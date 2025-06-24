@@ -4,39 +4,36 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from typing import List
 
-from llama_stack.distribution.datatypes import *  # noqa: F403
+from llama_stack.providers.datatypes import (
+    Api,
+    InlineProviderSpec,
+    ProviderSpec,
+)
 from llama_stack.providers.utils.kvstore import kvstore_dependencies
 
 
-def available_providers() -> List[ProviderSpec]:
+def available_providers() -> list[ProviderSpec]:
     return [
         InlineProviderSpec(
             api=Api.agents,
-            provider_type="meta-reference",
+            provider_type="inline::meta-reference",
             pip_packages=[
                 "matplotlib",
                 "pillow",
                 "pandas",
                 "scikit-learn",
             ]
-            + kvstore_dependencies(),
-            module="llama_stack.providers.impls.meta_reference.agents",
-            config_class="llama_stack.providers.impls.meta_reference.agents.MetaReferenceAgentsImplConfig",
+            + kvstore_dependencies(),  # TODO make this dynamic based on the kvstore config
+            module="llama_stack.providers.inline.agents.meta_reference",
+            config_class="llama_stack.providers.inline.agents.meta_reference.MetaReferenceAgentsImplConfig",
             api_dependencies=[
                 Api.inference,
                 Api.safety,
-                Api.memory,
+                Api.vector_io,
+                Api.vector_dbs,
+                Api.tool_runtime,
+                Api.tool_groups,
             ],
-        ),
-        remote_provider_spec(
-            api=Api.agents,
-            adapter=AdapterSpec(
-                adapter_type="sample",
-                pip_packages=[],
-                module="llama_stack.providers.adapters.agents.sample",
-                config_class="llama_stack.providers.adapters.agents.sample.SampleConfig",
-            ),
         ),
     ]

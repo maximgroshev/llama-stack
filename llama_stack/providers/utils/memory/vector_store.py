@@ -5,42 +5,45 @@
 # the root directory of this source tree.
 import base64
 import io
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 from urllib.parse import unquote
 
-import chardet
 import httpx
 import numpy as np
 from numpy.typing import NDArray
-from pypdf import PdfReader
-from termcolor import cprint
 
-from llama_models.llama3.api.datatypes import *  # noqa: F403
-from llama_models.llama3.api.tokenizer import Tokenizer
+from llama_stack.apis.common.content_types import (
+    URL,
+    InterleavedContent,
+    TextContentItem,
+)
+from llama_stack.apis.tools import RAGDocument
+from llama_stack.apis.vector_dbs import VectorDB
+from llama_stack.apis.vector_io import Chunk, QueryChunksResponse
+from llama_stack.models.llama.llama3.tokenizer import Tokenizer
+from llama_stack.providers.datatypes import Api
+from llama_stack.providers.utils.inference.prompt_adapter import (
+    interleaved_content_as_str,
+)
 
-from llama_stack.apis.memory import *  # noqa: F403
+log = logging.getLogger(__name__)
 
-ALL_MINILM_L6_V2_DIMENSION = 384
+# Constants for reranker types
+RERANKER_TYPE_RRF = "rrf"
+RERANKER_TYPE_WEIGHTED = "weighted"
 
-EMBEDDING_MODELS = {}
 
+def parse_pdf(data: bytes) -> str:
+    # For PDF and DOC/DOCX files, we can't reliably convert to string
+    pdf_bytes = io.BytesIO(data)
+    from pypdf import PdfReader
 
-def get_embedding_model(model: str) -> "SentenceTransformer":
-    global EMBEDDING_MODELS
-
-    loaded_model = EMBEDDING_MODELS.get(model)
-    if loaded_model is not None:
-        return loaded_model
-
-    print(f"Loading sentence transformer for {model}...")
-    from sentence_transformers import SentenceTransformer
-
-    loaded_model = SentenceTransformer(model)
-    EMBEDDING_MODELS[model] = loaded_model
-    return loaded_model
+    pdf_reader = PdfReader(pdf_bytes)
+    return "\n".join([page.extract_text() for page in pdf_reader.pages])
 
 
 def parse_data_url(data_url: str):
@@ -73,122 +76,214 @@ def content_from_data(data_url: str) -> str:
         data = unquote(data)
         encoding = parts["encoding"] or "utf-8"
         data = data.encode(encoding)
+    return content_from_data_and_mime_type(data, parts["mimetype"], parts.get("encoding", None))
 
-    encoding = parts["encoding"]
-    if not encoding:
-        detected = chardet.detect(data)
-        encoding = detected["encoding"]
 
-    mime_type = parts["mimetype"]
-    mime_category = mime_type.split("/")[0]
+def content_from_data_and_mime_type(data: bytes | str, mime_type: str | None, encoding: str | None = None) -> str:
+    if isinstance(data, bytes):
+        if not encoding:
+            import chardet
+
+            detected = chardet.detect(data)
+            encoding = detected["encoding"]
+
+    mime_category = mime_type.split("/")[0] if mime_type else None
     if mime_category == "text":
         # For text-based files (including CSV, MD)
         return data.decode(encoding)
 
     elif mime_type == "application/pdf":
-        # For PDF and DOC/DOCX files, we can't reliably convert to string)
-        pdf_bytes = io.BytesIO(data)
-        pdf_reader = PdfReader(pdf_bytes)
-        return "\n".join([page.extract_text() for page in pdf_reader.pages])
+        return parse_pdf(data)
 
     else:
-        cprint("Could not extract content from data_url properly.", color="red")
+        log.error("Could not extract content from data_url properly.")
         return ""
 
 
-async def content_from_doc(doc: MemoryBankDocument) -> str:
+def concat_interleaved_content(content: list[InterleavedContent]) -> InterleavedContent:
+    """concatenate interleaved content into a single list. ensure that 'str's are converted to TextContentItem when in a list"""
+
+    ret = []
+
+    def _process(c):
+        if isinstance(c, str):
+            ret.append(TextContentItem(text=c))
+        elif isinstance(c, list):
+            for item in c:
+                _process(item)
+        else:
+            ret.append(c)
+
+    for c in content:
+        _process(c)
+
+    return ret
+
+
+async def content_from_doc(doc: RAGDocument) -> str:
     if isinstance(doc.content, URL):
         if doc.content.uri.startswith("data:"):
             return content_from_data(doc.content.uri)
-        else:
-            async with httpx.AsyncClient() as client:
-                r = await client.get(doc.content.uri)
-                return r.text
-
-    pattern = re.compile("^(https?://|file://|data:)")
-    if pattern.match(doc.content):
-        if doc.content.startswith("data:"):
-            return content_from_data(doc.content)
-        else:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(doc.content.uri)
+        if doc.mime_type == "application/pdf":
+            return parse_pdf(r.content)
+        return r.text
+    elif isinstance(doc.content, str):
+        pattern = re.compile("^(https?://|file://|data:)")
+        if pattern.match(doc.content):
+            if doc.content.startswith("data:"):
+                return content_from_data(doc.content)
             async with httpx.AsyncClient() as client:
                 r = await client.get(doc.content)
-                return r.text
-
-    return interleaved_text_media_as_str(doc.content)
+            if doc.mime_type == "application/pdf":
+                return parse_pdf(r.content)
+            return r.text
+        return doc.content
+    else:
+        # will raise ValueError if the content is not List[InterleavedContent] or InterleavedContent
+        return interleaved_content_as_str(doc.content)
 
 
 def make_overlapped_chunks(
-    document_id: str, text: str, window_len: int, overlap_len: int
-) -> List[Chunk]:
+    document_id: str, text: str, window_len: int, overlap_len: int, metadata: dict[str, Any]
+) -> list[Chunk]:
     tokenizer = Tokenizer.get_instance()
     tokens = tokenizer.encode(text, bos=False, eos=False)
+    try:
+        metadata_string = str(metadata)
+    except Exception as e:
+        raise ValueError("Failed to serialize metadata to string") from e
+
+    metadata_tokens = tokenizer.encode(metadata_string, bos=False, eos=False)
 
     chunks = []
     for i in range(0, len(tokens), window_len - overlap_len):
         toks = tokens[i : i + window_len]
         chunk = tokenizer.decode(toks)
+        chunk_metadata = metadata.copy()
+        chunk_metadata["document_id"] = document_id
+        chunk_metadata["token_count"] = len(toks)
+        chunk_metadata["metadata_token_count"] = len(metadata_tokens)
+
+        # chunk is a string
         chunks.append(
-            Chunk(content=chunk, token_count=len(toks), document_id=document_id)
+            Chunk(
+                content=chunk,
+                metadata=chunk_metadata,
+            )
         )
 
     return chunks
 
 
+def _validate_embedding(embedding: NDArray, index: int, expected_dimension: int):
+    """Helper method to validate embedding format and dimensions"""
+    if not isinstance(embedding, (list | np.ndarray)):
+        raise ValueError(f"Embedding at index {index} must be a list or numpy array, got {type(embedding)}")
+
+    if isinstance(embedding, np.ndarray):
+        if not np.issubdtype(embedding.dtype, np.number):
+            raise ValueError(f"Embedding at index {index} contains non-numeric values")
+    else:
+        if not all(isinstance(e, (float | int | np.number)) for e in embedding):
+            raise ValueError(f"Embedding at index {index} contains non-numeric values")
+
+    if len(embedding) != expected_dimension:
+        raise ValueError(f"Embedding at index {index} has dimension {len(embedding)}, expected {expected_dimension}")
+
+
 class EmbeddingIndex(ABC):
     @abstractmethod
-    async def add_chunks(self, chunks: List[Chunk], embeddings: NDArray):
+    async def add_chunks(self, chunks: list[Chunk], embeddings: NDArray):
         raise NotImplementedError()
 
     @abstractmethod
-    async def query(self, embedding: NDArray, k: int) -> QueryDocumentsResponse:
+    async def query_vector(self, embedding: NDArray, k: int, score_threshold: float) -> QueryChunksResponse:
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def query_keyword(self, query_string: str, k: int, score_threshold: float) -> QueryChunksResponse:
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def query_hybrid(
+        self,
+        embedding: NDArray,
+        query_string: str,
+        k: int,
+        score_threshold: float,
+        reranker_type: str,
+        reranker_params: dict[str, Any] | None = None,
+    ) -> QueryChunksResponse:
+        raise NotImplementedError()
+
+    @abstractmethod
+    async def delete(self):
         raise NotImplementedError()
 
 
 @dataclass
-class BankWithIndex:
-    bank: MemoryBank
+class VectorDBWithIndex:
+    vector_db: VectorDB
     index: EmbeddingIndex
+    inference_api: Api.inference
 
-    async def insert_documents(
+    async def insert_chunks(
         self,
-        documents: List[MemoryBankDocument],
+        chunks: list[Chunk],
     ) -> None:
-        model = get_embedding_model(self.bank.config.embedding_model)
-        for doc in documents:
-            content = await content_from_doc(doc)
-            chunks = make_overlapped_chunks(
-                doc.document_id,
-                content,
-                self.bank.config.chunk_size_in_tokens,
-                self.bank.config.overlap_size_in_tokens
-                or (self.bank.config.chunk_size_in_tokens // 4),
+        chunks_to_embed = []
+        for i, c in enumerate(chunks):
+            if c.embedding is None:
+                chunks_to_embed.append(c)
+            else:
+                _validate_embedding(c.embedding, i, self.vector_db.embedding_dimension)
+
+        if chunks_to_embed:
+            resp = await self.inference_api.embeddings(
+                self.vector_db.embedding_model,
+                [c.content for c in chunks_to_embed],
             )
-            if not chunks:
-                continue
-            embeddings = model.encode([x.content for x in chunks]).astype(np.float32)
+            for c, embedding in zip(chunks_to_embed, resp.embeddings, strict=False):
+                c.embedding = embedding
 
-            await self.index.add_chunks(chunks, embeddings)
+        embeddings = np.array([c.embedding for c in chunks], dtype=np.float32)
+        await self.index.add_chunks(chunks, embeddings)
 
-    async def query_documents(
+    async def query_chunks(
         self,
-        query: InterleavedTextMedia,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> QueryDocumentsResponse:
+        query: InterleavedContent,
+        params: dict[str, Any] | None = None,
+    ) -> QueryChunksResponse:
         if params is None:
             params = {}
         k = params.get("max_chunks", 3)
+        mode = params.get("mode")
+        score_threshold = params.get("score_threshold", 0.0)
 
-        def _process(c) -> str:
-            if isinstance(c, str):
-                return c
-            else:
-                return "<media>"
-
-        if isinstance(query, list):
-            query_str = " ".join([_process(c) for c in query])
+        # Get ranker configuration
+        ranker = params.get("ranker")
+        if ranker is None:
+            # Default to RRF with impact_factor=60.0
+            reranker_type = RERANKER_TYPE_RRF
+            reranker_params = {"impact_factor": 60.0}
         else:
-            query_str = _process(query)
+            reranker_type = ranker.type
+            reranker_params = (
+                {"impact_factor": ranker.impact_factor} if ranker.type == RERANKER_TYPE_RRF else {"alpha": ranker.alpha}
+            )
 
-        model = get_embedding_model(self.bank.config.embedding_model)
-        query_vector = model.encode([query_str])[0].astype(np.float32)
-        return await self.index.query(query_vector, k)
+        query_string = interleaved_content_as_str(query)
+        if mode == "keyword":
+            return await self.index.query_keyword(query_string, k, score_threshold)
+
+        # Calculate embeddings for both vector and hybrid modes
+        embeddings_response = await self.inference_api.embeddings(self.vector_db.embedding_model, [query_string])
+        query_vector = np.array(embeddings_response.embeddings[0], dtype=np.float32)
+        if mode == "hybrid":
+            return await self.index.query_hybrid(
+                query_vector, query_string, k, score_threshold, reranker_type, reranker_params
+            )
+        else:
+            return await self.index.query_vector(query_vector, k, score_threshold)

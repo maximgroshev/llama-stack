@@ -4,37 +4,57 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from typing import Dict, List, Protocol
+from typing import Protocol, runtime_checkable
 
-from llama_models.schema_utils import json_schema_type, webmethod
 from pydantic import BaseModel
 
-
-@json_schema_type
-class ProviderInfo(BaseModel):
-    provider_type: str
-    description: str
+from llama_stack.providers.datatypes import HealthStatus
+from llama_stack.schema_utils import json_schema_type, webmethod
 
 
 @json_schema_type
 class RouteInfo(BaseModel):
     route: str
     method: str
-    providers: List[str]
+    provider_types: list[str]
 
 
 @json_schema_type
 class HealthInfo(BaseModel):
-    status: str
-    # TODO: add a provider level status
+    status: HealthStatus
 
 
+@json_schema_type
+class VersionInfo(BaseModel):
+    version: str
+
+
+class ListRoutesResponse(BaseModel):
+    data: list[RouteInfo]
+
+
+@runtime_checkable
 class Inspect(Protocol):
-    @webmethod(route="/providers/list", method="GET")
-    async def list_providers(self) -> Dict[str, ProviderInfo]: ...
+    @webmethod(route="/inspect/routes", method="GET")
+    async def list_routes(self) -> ListRoutesResponse:
+        """List all routes.
 
-    @webmethod(route="/routes/list", method="GET")
-    async def list_routes(self) -> Dict[str, List[RouteInfo]]: ...
+        :returns: A ListRoutesResponse.
+        """
+        ...
 
     @webmethod(route="/health", method="GET")
-    async def health(self) -> HealthInfo: ...
+    async def health(self) -> HealthInfo:
+        """Get the health of the service.
+
+        :returns: A HealthInfo.
+        """
+        ...
+
+    @webmethod(route="/version", method="GET")
+    async def version(self) -> VersionInfo:
+        """Get the version of the service.
+
+        :returns: A VersionInfo.
+        """
+        ...

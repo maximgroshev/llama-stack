@@ -6,20 +6,23 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-LLAMA_MODELS_DIR=${LLAMA_MODELS_DIR:-}
 LLAMA_STACK_DIR=${LLAMA_STACK_DIR:-}
+LLAMA_STACK_CLIENT_DIR=${LLAMA_STACK_CLIENT_DIR:-}
 TEST_PYPI_VERSION=${TEST_PYPI_VERSION:-}
+# This timeout (in seconds) is necessary when installing PyTorch via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-500}
 
 if [ -n "$LLAMA_STACK_DIR" ]; then
   echo "Using llama-stack-dir=$LLAMA_STACK_DIR"
 fi
-if [ -n "$LLAMA_MODELS_DIR" ]; then
-  echo "Using llama-models-dir=$LLAMA_MODELS_DIR"
+if [ -n "$LLAMA_STACK_CLIENT_DIR" ]; then
+  echo "Using llama-stack-client-dir=$LLAMA_STACK_CLIENT_DIR"
 fi
 
 if [ "$#" -lt 3 ]; then
-  echo "Usage: $0 <distribution_type> <build_name> <build_file_path> <pip_dependencies> [<special_pip_deps>]" >&2
-  echo "Example: $0 <distribution_type> mybuild ./my-stack-build.yaml 'numpy pandas scipy'" >&2
+  echo "Usage: $0 <distribution_type> <conda_env_name> <build_file_path> <pip_dependencies> [<special_pip_deps>]" >&2
+  echo "Example: $0 <distribution_type> my-conda-env ./my-stack-build.yaml 'numpy pandas scipy'" >&2
   exit 1
 fi
 
@@ -27,8 +30,7 @@ special_pip_deps="$4"
 
 set -euo pipefail
 
-build_name="$1"
-env_name="llamastack-$build_name"
+env_name="$1"
 build_file_path="$2"
 pip_dependencies="$3"
 
@@ -47,10 +49,10 @@ ensure_conda_env_python310() {
   local env_name="$1"
   local pip_dependencies="$2"
   local special_pip_deps="$3"
-  local python_version="3.10"
+  local python_version="3.12"
 
   # Check if conda command is available
-  if ! command -v conda &>/dev/null; then
+  if ! is_command_available conda; then
     printf "${RED}Error: conda command not found. Is Conda installed and in your PATH?${NC}" >&2
     exit 1
   fi
@@ -79,17 +81,19 @@ ensure_conda_env_python310() {
   eval "$(conda shell.bash hook)"
   conda deactivate && conda activate "${env_name}"
 
+  "$CONDA_PREFIX"/bin/pip install uv
+
   if [ -n "$TEST_PYPI_VERSION" ]; then
     # these packages are damaged in test-pypi, so install them first
-    $CONDA_PREFIX/bin/pip install fastapi libcst
-    $CONDA_PREFIX/bin/pip install --extra-index-url https://test.pypi.org/simple/ \
-      llama-models==$TEST_PYPI_VERSION llama-stack==$TEST_PYPI_VERSION \
-      $pip_dependencies
+    uv pip install fastapi libcst
+    uv pip install --extra-index-url https://test.pypi.org/simple/ \
+      llama-stack=="$TEST_PYPI_VERSION" \
+      "$pip_dependencies"
     if [ -n "$special_pip_deps" ]; then
       IFS='#' read -ra parts <<<"$special_pip_deps"
       for part in "${parts[@]}"; do
         echo "$part"
-        $CONDA_PREFIX/bin/pip install $part
+        uv pip install "$part"
       done
     fi
   else
@@ -101,36 +105,41 @@ ensure_conda_env_python310() {
       fi
 
       printf "Installing from LLAMA_STACK_DIR: $LLAMA_STACK_DIR\n"
-      $CONDA_PREFIX/bin/pip install --no-cache-dir -e "$LLAMA_STACK_DIR"
+      uv pip install --no-cache-dir -e "$LLAMA_STACK_DIR"
     else
-      $CONDA_PREFIX/bin/pip install --no-cache-dir llama-stack
+      PYPI_VERSION="${PYPI_VERSION:-}"
+      if [ -n "$PYPI_VERSION" ]; then
+        SPEC_VERSION="llama-stack==${PYPI_VERSION}"
+      else
+        SPEC_VERSION="llama-stack"
+      fi
+      uv pip install --no-cache-dir "$SPEC_VERSION"
     fi
 
-    if [ -n "$LLAMA_MODELS_DIR" ]; then
-      if [ ! -d "$LLAMA_MODELS_DIR" ]; then
-        printf "${RED}Warning: LLAMA_MODELS_DIR is set but directory does not exist: $LLAMA_MODELS_DIR${NC}\n" >&2
+    if [ -n "$LLAMA_STACK_CLIENT_DIR" ]; then
+      if [ ! -d "$LLAMA_STACK_CLIENT_DIR" ]; then
+        printf "${RED}Warning: LLAMA_STACK_CLIENT_DIR is set but directory does not exist: $LLAMA_STACK_CLIENT_DIR${NC}\n" >&2
         exit 1
       fi
 
-      printf "Installing from LLAMA_MODELS_DIR: $LLAMA_MODELS_DIR\n"
-      $CONDA_PREFIX/bin/pip uninstall -y llama-models
-      $CONDA_PREFIX/bin/pip install --no-cache-dir -e "$LLAMA_MODELS_DIR"
+      printf "Installing from LLAMA_STACK_CLIENT_DIR: $LLAMA_STACK_CLIENT_DIR\n"
+      uv pip install --no-cache-dir -e "$LLAMA_STACK_CLIENT_DIR"
     fi
 
     # Install pip dependencies
     printf "Installing pip dependencies\n"
-    $CONDA_PREFIX/bin/pip install $pip_dependencies
+    uv pip install "$pip_dependencies"
     if [ -n "$special_pip_deps" ]; then
       IFS='#' read -ra parts <<<"$special_pip_deps"
       for part in "${parts[@]}"; do
         echo "$part"
-        $CONDA_PREFIX/bin/pip install $part
+        uv pip install "$part"
       done
     fi
   fi
 
-  mv $build_file_path $CONDA_PREFIX/
-  echo "Build spec configuration saved at $CONDA_PREFIX/$build_name-build.yaml"
+  mv "$build_file_path" "$CONDA_PREFIX"/llamastack-build.yaml
+  echo "Build spec configuration saved at $CONDA_PREFIX/llamastack-build.yaml"
 }
 
 ensure_conda_env_python310 "$env_name" "$pip_dependencies" "$special_pip_deps"

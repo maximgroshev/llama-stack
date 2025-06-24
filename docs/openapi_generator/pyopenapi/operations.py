@@ -8,18 +8,20 @@ import collections.abc
 import enum
 import inspect
 import typing
-import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
+from llama_stack.apis.version import LLAMA_STACK_API_VERSION
+
 from termcolor import colored
 
-from ..strong_typing.inspection import (
-    get_signature,
-    is_type_enum,
-    is_type_optional,
-    unwrap_optional_type,
-)
+from llama_stack.strong_typing.inspection import get_signature
+
+from typing import get_origin, get_args
+
+from fastapi import UploadFile 
+from fastapi.params import File, Form
+from typing import Annotated
 
 
 def split_prefix(
@@ -86,6 +88,7 @@ class EndpointOperation:
     :param path_params: Parameters of the operation signature that are passed in the path component of the URL string.
     :param query_params: Parameters of the operation signature that are passed in the query string as `key=value` pairs.
     :param request_params: The parameter that corresponds to the data transmitted in the request body.
+    :param multipart_params: Parameters that indicate multipart/form-data request body.
     :param event_type: The Python type of the data that is transmitted out-of-band (e.g. via websockets) while the operation is in progress.
     :param response_type: The Python type of the data that is transmitted in the response body.
     :param http_method: The HTTP method used to invoke the endpoint such as POST, GET or PUT.
@@ -102,6 +105,7 @@ class EndpointOperation:
     path_params: List[OperationParameter]
     query_params: List[OperationParameter]
     request_params: Optional[OperationParameter]
+    multipart_params: List[OperationParameter]
     event_type: Optional[type]
     response_type: type
     http_method: HTTPMethod
@@ -111,9 +115,9 @@ class EndpointOperation:
 
     def get_route(self) -> str:
         if self.route is not None:
-            return self.route
+            return "/".join(["", LLAMA_STACK_API_VERSION, self.route.lstrip("/")])
 
-        route_parts = ["", self.name]
+        route_parts = ["", LLAMA_STACK_API_VERSION, self.name]
         for param_name, _ in self.path_params:
             route_parts.append("{" + param_name + "}")
         return "/".join(route_parts)
@@ -134,6 +138,8 @@ class _FormatParameterExtractor:
 
 def _get_route_parameters(route: str) -> List[str]:
     extractor = _FormatParameterExtractor()
+    # Replace all occurrences of ":path" with empty string
+    route = route.replace(":path", "")
     route.format_map(extractor)
     return extractor.keys
 
@@ -152,7 +158,14 @@ def _get_endpoint_functions(
 
         print(f"Processing {colored(func_name, 'white')}...")
         operation_name = func_name
-        if operation_name.startswith("get_") or operation_name.endswith("/get"):
+        
+        if webmethod.method == "GET":
+            prefix = "get"
+        elif webmethod.method == "DELETE":
+            prefix = "delete"
+        elif webmethod.method == "POST":
+            prefix = "post"
+        elif operation_name.startswith("get_") or operation_name.endswith("/get"):
             prefix = "get"
         elif (
             operation_name.startswith("delete_")
@@ -162,13 +175,8 @@ def _get_endpoint_functions(
         ):
             prefix = "delete"
         else:
-            if webmethod.method == "GET":
-                prefix = "get"
-            elif webmethod.method == "DELETE":
-                prefix = "delete"
-            else:
-                # by default everything else is a POST
-                prefix = "post"
+            # by default everything else is a POST
+            prefix = "post"
 
         yield prefix, operation_name, func_name, func_ref
 
@@ -176,10 +184,16 @@ def _get_endpoint_functions(
 def _get_defining_class(member_fn: str, derived_cls: type) -> type:
     "Find the class in which a member function is first defined in a class inheritance hierarchy."
 
+    # This import must be dynamic here
+    from llama_stack.apis.tools import RAGToolRuntime, ToolRuntime
+
     # iterate in reverse member resolution order to find most specific class first
     for cls in reversed(inspect.getmro(derived_cls)):
         for name, _ in inspect.getmembers(cls, inspect.isfunction):
             if name == member_fn:
+                # HACK ALERT
+                if cls == RAGToolRuntime:
+                    return ToolRuntime
                 return cls
 
     raise ValidationError(
@@ -246,6 +260,7 @@ def get_endpoint_operations(
         path_params = []
         query_params = []
         request_params = []
+        multipart_params = []
 
         for param_name, parameter in signature.parameters.items():
             param_type = _get_annotation_type(parameter.annotation, func_ref)
@@ -260,42 +275,20 @@ def get_endpoint_operations(
                     f"parameter '{param_name}' in function '{func_name}' has no type annotation"
                 )
 
-            if is_type_optional(param_type):
-                inner_type: type = unwrap_optional_type(param_type)
-            else:
-                inner_type = param_type
-
-            if prefix == "get" and (
-                inner_type is bool
-                or inner_type is int
-                or inner_type is float
-                or inner_type is str
-                or inner_type is uuid.UUID
-                or is_type_enum(inner_type)
-            ):
-                if parameter.kind == inspect.Parameter.POSITIONAL_ONLY:
-                    if route_params is not None and param_name not in route_params:
-                        raise ValidationError(
-                            f"positional parameter '{param_name}' absent from user-defined route '{route}' for function '{func_name}'"
-                        )
-
-                    # simple type maps to route path element, e.g. /study/{uuid}/{version}
+            is_multipart = _is_multipart_param(param_type)
+            
+            if prefix in ["get", "delete"]:
+                if route_params is not None and param_name in route_params:
                     path_params.append((param_name, param_type))
                 else:
-                    if route_params is not None and param_name in route_params:
-                        raise ValidationError(
-                            f"query parameter '{param_name}' found in user-defined route '{route}' for function '{func_name}'"
-                        )
-
-                    # simple type maps to key=value pair in query string
                     query_params.append((param_name, param_type))
             else:
                 if route_params is not None and param_name in route_params:
-                    raise ValidationError(
-                        f"user-defined route '{route}' for function '{func_name}' has parameter '{param_name}' of composite type: {param_type}"
-                    )
-
-                request_params.append((param_name, param_type))
+                    path_params.append((param_name, param_type))
+                elif is_multipart:
+                    multipart_params.append((param_name, param_type))
+                else:
+                    request_params.append((param_name, param_type))
 
         # check if function has explicit return type
         if signature.return_annotation is inspect.Signature.empty:
@@ -315,21 +308,33 @@ def get_endpoint_operations(
                 )
         else:
             event_type = None
-            response_type = return_type
 
-        # set HTTP request method based on type of request and presence of payload
-        if not request_params:
+            def process_type(t):
+                if typing.get_origin(t) is collections.abc.AsyncIterator:
+                    # NOTE(ashwin): this is SSE and there is no way to represent it. either we make it a List
+                    # or the item type. I am choosing it to be the latter
+                    args = typing.get_args(t)
+                    return args[0]
+                elif typing.get_origin(t) is typing.Union:
+                    types = [process_type(a) for a in typing.get_args(t)]
+                    return typing._UnionGenericAlias(typing.Union, tuple(types))
+                else:
+                    return t
+
+            response_type = process_type(return_type)
+
             if prefix in ["delete", "remove"]:
                 http_method = HTTPMethod.DELETE
-            else:
+            elif prefix == "post":
+                http_method = HTTPMethod.POST
+            elif prefix == "get":
                 http_method = HTTPMethod.GET
-        else:
-            if prefix == "set":
+            elif prefix == "set":
                 http_method = HTTPMethod.PUT
             elif prefix == "update":
                 http_method = HTTPMethod.PATCH
             else:
-                http_method = HTTPMethod.POST
+                raise ValidationError(f"unknown prefix {prefix}")
 
         result.append(
             EndpointOperation(
@@ -341,6 +346,7 @@ def get_endpoint_operations(
                 path_params=path_params,
                 query_params=query_params,
                 request_params=request_params,
+                multipart_params=multipart_params,
                 event_type=event_type,
                 response_type=response_type,
                 http_method=http_method,
@@ -385,3 +391,34 @@ def get_endpoint_events(endpoint: type) -> Dict[str, type]:
         results[param_type.__name__] = param_type
 
     return results
+
+
+def _is_multipart_param(param_type: type) -> bool:
+    """
+    Check if a parameter type indicates multipart form data.
+    
+    Returns True if the type is:
+    - UploadFile
+    - Annotated[UploadFile, File()]
+    - Annotated[str, Form()]
+    - Annotated[Any, File()]
+    - Annotated[Any, Form()]
+    """
+    if param_type is UploadFile:
+        return True
+    
+    # Check for Annotated types
+    origin = get_origin(param_type)
+    if origin is None:
+        return False
+    
+    if origin is Annotated:
+        args = get_args(param_type)
+        if len(args) < 2:
+            return False
+        
+        # Check the annotations for File() or Form()
+        for annotation in args[1:]:
+            if isinstance(annotation, (File, Form)):
+                return True
+    return False

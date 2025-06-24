@@ -7,13 +7,9 @@
 import argparse
 import json
 
-from llama_models.sku_list import resolve_model
-
-from termcolor import colored
-
 from llama_stack.cli.subcommand import Subcommand
 from llama_stack.cli.table import print_table
-from llama_stack.distribution.utils.serialize import EnumEncoder
+from llama_stack.models.llama.sku_list import resolve_model
 
 
 class ModelDescribe(Subcommand):
@@ -36,14 +32,15 @@ class ModelDescribe(Subcommand):
             "--model-id",
             type=str,
             required=True,
+            help="See `llama model list` or `llama model list --show-all` for the list of available models",
         )
 
     def _run_model_describe_cmd(self, args: argparse.Namespace) -> None:
-        from .safety_models import prompt_guard_model_sku
+        from .safety_models import prompt_guard_model_sku_map
 
-        prompt_guard = prompt_guard_model_sku()
-        if args.model_id == prompt_guard.model_id:
-            model = prompt_guard
+        prompt_guard_model_map = prompt_guard_model_sku_map()
+        if args.model_id in prompt_guard_model_map.keys():
+            model = prompt_guard_model_map[args.model_id]
         else:
             model = resolve_model(args.model_id)
 
@@ -53,11 +50,12 @@ class ModelDescribe(Subcommand):
             )
             return
 
+        headers = [
+            "Model",
+            model.descriptor(),
+        ]
+
         rows = [
-            (
-                colored("Model", "white", attrs=["bold"]),
-                colored(model.descriptor(), "white", attrs=["bold"]),
-            ),
             ("Hugging Face ID", model.huggingface_repo or "<Not Available>"),
             ("Description", model.description),
             ("Context Length", f"{model.max_seq_length // 1024}K tokens"),
@@ -65,18 +63,8 @@ class ModelDescribe(Subcommand):
             ("Model params.json", json.dumps(model.arch_args, indent=4)),
         ]
 
-        if model.recommended_sampling_params is not None:
-            sampling_params = model.recommended_sampling_params.dict()
-            for k in ("max_tokens", "repetition_penalty"):
-                del sampling_params[k]
-            rows.append(
-                (
-                    "Recommended sampling params",
-                    json.dumps(sampling_params, cls=EnumEncoder, indent=4),
-                )
-            )
-
         print_table(
             rows,
+            headers,
             separate_rows=True,
         )

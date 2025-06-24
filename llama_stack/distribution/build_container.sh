@@ -1,45 +1,80 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-LLAMA_MODELS_DIR=${LLAMA_MODELS_DIR:-}
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the terms described in the LICENSE file in
+# the root directory of this source tree.
+
 LLAMA_STACK_DIR=${LLAMA_STACK_DIR:-}
+LLAMA_STACK_CLIENT_DIR=${LLAMA_STACK_CLIENT_DIR:-}
+
 TEST_PYPI_VERSION=${TEST_PYPI_VERSION:-}
+PYPI_VERSION=${PYPI_VERSION:-}
+BUILD_PLATFORM=${BUILD_PLATFORM:-}
+# This timeout (in seconds) is necessary when installing PyTorch via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-500}
+
+# mounting is not supported by docker buildx, so we use COPY instead
+USE_COPY_NOT_MOUNT=${USE_COPY_NOT_MOUNT:-}
+
+# Path to the run.yaml file in the container
+RUN_CONFIG_PATH=/app/run.yaml
+
+BUILD_CONTEXT_DIR=$(pwd)
 
 if [ "$#" -lt 4 ]; then
-  echo "Usage: $0 <build_name> <docker_base> <pip_dependencies> [<special_pip_deps>]" >&2
-  echo "Example: $0 my-fastapi-app python:3.9-slim 'fastapi uvicorn' " >&2
+  # This only works for templates
+  echo "Usage: $0 <template_or_config> <image_name> <container_base> <pip_dependencies> [<run_config>] [<special_pip_deps>]" >&2
   exit 1
 fi
-
-special_pip_deps="$6"
-
 set -euo pipefail
 
-build_name="$1"
-image_name="llamastack-$build_name"
-docker_base=$2
-build_file_path=$3
-host_build_dir=$4
-pip_dependencies=$5
+template_or_config="$1"
+shift
+image_name="$1"
+shift
+container_base="$1"
+shift
+pip_dependencies="$1"
+shift
+
+# Handle optional arguments
+run_config=""
+special_pip_deps=""
+
+# Check if there are more arguments
+# The logics is becoming cumbersom, we should refactor it if we can do better
+if [ $# -gt 0 ]; then
+  # Check if the argument ends with .yaml
+  if [[ "$1" == *.yaml ]]; then
+    run_config="$1"
+    shift
+    # If there's another argument after .yaml, it must be special_pip_deps
+    if [ $# -gt 0 ]; then
+      special_pip_deps="$1"
+    fi
+  else
+    # If it's not .yaml, it must be special_pip_deps
+    special_pip_deps="$1"
+  fi
+fi
 
 # Define color codes
 RED='\033[0;31m'
-GREEN='\033[0;32m'
 NC='\033[0m' # No Color
 
-SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
-REPO_DIR=$(dirname $(dirname "$SCRIPT_DIR"))
-DOCKER_BINARY=${DOCKER_BINARY:-docker}
-DOCKER_OPTS=${DOCKER_OPTS:-}
-REPO_CONFIGS_DIR="$REPO_DIR/tmp/configs"
+CONTAINER_BINARY=${CONTAINER_BINARY:-docker}
+CONTAINER_OPTS=${CONTAINER_OPTS:---progress=plain}
 
 TEMP_DIR=$(mktemp -d)
 
-llama stack configure $build_file_path
-cp $host_build_dir/$build_name-run.yaml $REPO_CONFIGS_DIR
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+source "$SCRIPT_DIR/common.sh"
 
-add_to_docker() {
-  local input
-  output_file="$TEMP_DIR/Dockerfile"
+add_to_container() {
+  output_file="$TEMP_DIR/Containerfile"
   if [ -t 0 ]; then
     printf '%s\n' "$1" >>"$output_file"
   else
@@ -48,95 +83,258 @@ add_to_docker() {
   fi
 }
 
-add_to_docker <<EOF
-FROM $docker_base
+# Check if container command is available
+if ! is_command_available "$CONTAINER_BINARY"; then
+  printf "${RED}Error: ${CONTAINER_BINARY} command not found. Is ${CONTAINER_BINARY} installed and in your PATH?${NC}" >&2
+  exit 1
+fi
+
+# Update and install UBI9 components if UBI9 base image is used
+if [[ $container_base == *"registry.access.redhat.com/ubi9"* ]]; then
+  add_to_container << EOF
+FROM $container_base
+WORKDIR /app
+
+# We install the Python 3.12 dev headers and build tools so that any
+# C‑extension wheels (e.g. polyleven, faiss‑cpu) can compile successfully.
+
+RUN dnf -y update && dnf install -y iputils git net-tools wget \
+    vim-minimal python3.12 python3.12-pip python3.12-wheel \
+    python3.12-setuptools python3.12-devel gcc make && \
+    ln -s /bin/pip3.12 /bin/pip && ln -s /bin/python3.12 /bin/python && dnf clean all
+
+ENV UV_SYSTEM_PYTHON=1
+RUN pip install uv
+EOF
+else
+  add_to_container << EOF
+FROM $container_base
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
        iputils-ping net-tools iproute2 dnsutils telnet \
-       curl wget telnet \
+       curl wget telnet git\
        procps psmisc lsof \
        traceroute \
        bubblewrap \
+       gcc \
        && rm -rf /var/lib/apt/lists/*
 
-EOF
-
-stack_mount="/app/llama-stack-source"
-models_mount="/app/llama-models-source"
-
-if [ -n "$LLAMA_STACK_DIR" ]; then
-  if [ ! -d "$LLAMA_STACK_DIR" ]; then
-    echo "${RED}Warning: LLAMA_STACK_DIR is set but directory does not exist: $LLAMA_STACK_DIR${NC}" >&2
-    exit 1
-  fi
-
-  # Install in editable format. We will mount the source code into the container
-  # so that changes will be reflected in the container without having to do a
-  # rebuild. This is just for development convenience.
-  add_to_docker "RUN pip install -e $stack_mount"
-else
-  add_to_docker "RUN pip install llama-stack"
-fi
-
-if [ -n "$LLAMA_MODELS_DIR" ]; then
-  if [ ! -d "$LLAMA_MODELS_DIR" ]; then
-    echo "${RED}Warning: LLAMA_MODELS_DIR is set but directory does not exist: $LLAMA_MODELS_DIR${NC}" >&2
-    exit 1
-  fi
-
-  add_to_docker <<EOF
-RUN pip uninstall -y llama-models
-RUN pip install $models_mount
-
+ENV UV_SYSTEM_PYTHON=1
+RUN pip install uv
 EOF
 fi
 
+# Add pip dependencies first since llama-stack is what will change most often
+# so we can reuse layers.
 if [ -n "$pip_dependencies" ]; then
-  add_to_docker "RUN pip install $pip_dependencies"
+  add_to_container << EOF
+RUN uv pip install --no-cache $pip_dependencies
+EOF
 fi
 
 if [ -n "$special_pip_deps" ]; then
-  IFS='#' read -ra parts <<< "$special_pip_deps"
+  IFS='#' read -ra parts <<<"$special_pip_deps"
   for part in "${parts[@]}"; do
-    add_to_docker "RUN pip install $part"
+    add_to_container <<EOF
+RUN uv pip install --no-cache $part
+EOF
   done
 fi
 
-add_to_docker <<EOF
+# Function to get Python command
+get_python_cmd() {
+    if is_command_available python; then
+        echo "python"
+    elif is_command_available python3; then
+        echo "python3"
+    else
+        echo "Error: Neither python nor python3 is installed. Please install Python to continue." >&2
+        exit 1
+    fi
+}
 
-# This would be good in production but for debugging flexibility lets not add it right now
-# We need a more solid production ready entrypoint.sh anyway
-#
-ENTRYPOINT ["python", "-m", "llama_stack.distribution.server.server"]
-
+# Add other required item commands generic to all containers
+add_to_container << EOF
+# Allows running as non-root user
+RUN mkdir -p /.llama/providers.d /.cache
 EOF
 
-add_to_docker "ADD tmp/configs/$(basename "$build_file_path") ./llamastack-build.yaml"
-add_to_docker "ADD tmp/configs/$build_name-run.yaml ./llamastack-run.yaml"
+if [ -n "$run_config" ]; then
+  # Copy the run config to the build context since it's an absolute path
+  cp "$run_config" "$BUILD_CONTEXT_DIR/run.yaml"
 
-printf "Dockerfile created successfully in $TEMP_DIR/Dockerfile"
-cat $TEMP_DIR/Dockerfile
+  # Parse the run.yaml configuration to identify external provider directories
+  # If external providers are specified, copy their directory to the container
+  # and update the configuration to reference the new container path
+  python_cmd=$(get_python_cmd)
+  external_providers_dir=$($python_cmd -c "import yaml; config = yaml.safe_load(open('$run_config')); print(config.get('external_providers_dir') or '')")
+  external_providers_dir=$(eval echo "$external_providers_dir")
+  if [ -n "$external_providers_dir" ]; then
+    if [ -d "$external_providers_dir" ]; then
+    echo "Copying external providers directory: $external_providers_dir"
+    cp -r "$external_providers_dir" "$BUILD_CONTEXT_DIR/providers.d"
+    add_to_container << EOF
+COPY providers.d /.llama/providers.d
+EOF
+    fi
+
+    # Edit the run.yaml file to change the external_providers_dir to /.llama/providers.d
+    if [ "$(uname)" = "Darwin" ]; then
+      sed -i.bak -e 's|external_providers_dir:.*|external_providers_dir: /.llama/providers.d|' "$BUILD_CONTEXT_DIR/run.yaml"
+      rm -f "$BUILD_CONTEXT_DIR/run.yaml.bak"
+    else
+      sed -i 's|external_providers_dir:.*|external_providers_dir: /.llama/providers.d|' "$BUILD_CONTEXT_DIR/run.yaml"
+    fi
+  fi
+
+  # Copy run config into docker image
+  add_to_container << EOF
+COPY run.yaml $RUN_CONFIG_PATH
+EOF
+fi
+
+stack_mount="/app/llama-stack-source"
+client_mount="/app/llama-stack-client-source"
+
+install_local_package() {
+  local dir="$1"
+  local mount_point="$2"
+  local name="$3"
+
+  if [ ! -d "$dir" ]; then
+    echo "${RED}Warning: $name is set but directory does not exist: $dir${NC}" >&2
+    exit 1
+  fi
+
+  if [ "$USE_COPY_NOT_MOUNT" = "true" ]; then
+    add_to_container << EOF
+COPY $dir $mount_point
+EOF
+  fi
+  add_to_container << EOF
+RUN uv pip install --no-cache -e $mount_point
+EOF
+}
+
+
+if [ -n "$LLAMA_STACK_CLIENT_DIR" ]; then
+  install_local_package "$LLAMA_STACK_CLIENT_DIR" "$client_mount" "LLAMA_STACK_CLIENT_DIR"
+fi
+
+if [ -n "$LLAMA_STACK_DIR" ]; then
+  install_local_package "$LLAMA_STACK_DIR" "$stack_mount" "LLAMA_STACK_DIR"
+else
+  if [ -n "$TEST_PYPI_VERSION" ]; then
+    # these packages are damaged in test-pypi, so install them first
+    add_to_container << EOF
+RUN uv pip install fastapi libcst
+EOF
+    add_to_container << EOF
+RUN uv pip install --no-cache --extra-index-url https://test.pypi.org/simple/ \
+  --index-strategy unsafe-best-match \
+  llama-stack==$TEST_PYPI_VERSION
+
+EOF
+  else
+    if [ -n "$PYPI_VERSION" ]; then
+      SPEC_VERSION="llama-stack==${PYPI_VERSION}"
+    else
+      SPEC_VERSION="llama-stack"
+    fi
+    add_to_container << EOF
+RUN uv pip install --no-cache $SPEC_VERSION
+EOF
+  fi
+fi
+
+# remove uv after installation
+  add_to_container << EOF
+RUN pip uninstall -y uv
+EOF
+
+# If a run config is provided, we use the --config flag
+if [[ -n "$run_config" ]]; then
+  add_to_container << EOF
+ENTRYPOINT ["python", "-m", "llama_stack.distribution.server.server", "--config", "$RUN_CONFIG_PATH"]
+EOF
+# If a template is provided (not a yaml file), we use the --template flag
+elif [[ "$template_or_config" != *.yaml ]]; then
+  add_to_container << EOF
+ENTRYPOINT ["python", "-m", "llama_stack.distribution.server.server", "--template", "$template_or_config"]
+EOF
+fi
+
+# Add other require item commands genearic to all containers
+add_to_container << EOF
+
+RUN chmod -R g+rw /app /.llama /.cache
+EOF
+
+printf "Containerfile created successfully in %s/Containerfile\n\n" "$TEMP_DIR"
+cat "$TEMP_DIR"/Containerfile
 printf "\n"
 
-mounts=""
-if [ -n "$LLAMA_STACK_DIR" ]; then
-  mounts="$mounts -v $(readlink -f $LLAMA_STACK_DIR):$stack_mount"
-fi
-if [ -n "$LLAMA_MODELS_DIR" ]; then
-  mounts="$mounts -v $(readlink -f $LLAMA_MODELS_DIR):$models_mount"
+# Start building the CLI arguments
+CLI_ARGS=()
+
+# Read CONTAINER_OPTS and put it in an array
+read -ra CLI_ARGS <<< "$CONTAINER_OPTS"
+
+if [ "$USE_COPY_NOT_MOUNT" != "true" ]; then
+  if [ -n "$LLAMA_STACK_DIR" ]; then
+    CLI_ARGS+=("-v" "$(readlink -f "$LLAMA_STACK_DIR"):$stack_mount")
+  fi
+  if [ -n "$LLAMA_STACK_CLIENT_DIR" ]; then
+    CLI_ARGS+=("-v" "$(readlink -f "$LLAMA_STACK_CLIENT_DIR"):$client_mount")
+  fi
 fi
 
-if command -v selinuxenabled &> /dev/null && selinuxenabled; then
+if is_command_available selinuxenabled && selinuxenabled; then
   # Disable SELinux labels -- we don't want to relabel the llama-stack source dir
-  DOCKER_OPTS="$DOCKER_OPTS --security-opt label=disable"
+  CLI_ARGS+=("--security-opt" "label=disable")
 fi
 
+# Set version tag based on PyPI version
+if [ -n "$PYPI_VERSION" ]; then
+  version_tag="$PYPI_VERSION"
+elif [ -n "$TEST_PYPI_VERSION" ]; then
+  version_tag="test-$TEST_PYPI_VERSION"
+elif [[ -n "$LLAMA_STACK_DIR" || -n "$LLAMA_STACK_CLIENT_DIR" ]]; then
+  version_tag="dev"
+else
+  URL="https://pypi.org/pypi/llama-stack/json"
+  version_tag=$(curl -s $URL | jq -r '.info.version')
+fi
+
+# Add version tag to image name
+image_tag="$image_name:$version_tag"
+
+# Detect platform architecture
+ARCH=$(uname -m)
+if [ -n "$BUILD_PLATFORM" ]; then
+  CLI_ARGS+=("--platform" "$BUILD_PLATFORM")
+elif [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
+  CLI_ARGS+=("--platform" "linux/arm64")
+elif [ "$ARCH" = "x86_64" ]; then
+  CLI_ARGS+=("--platform" "linux/amd64")
+else
+  echo "Unsupported architecture: $ARCH"
+  exit 1
+fi
+
+echo "PWD: $(pwd)"
+echo "Containerfile: $TEMP_DIR/Containerfile"
 set -x
-$DOCKER_BINARY build $DOCKER_OPTS -t $image_name -f "$TEMP_DIR/Dockerfile" "$REPO_DIR" $mounts
+
+$CONTAINER_BINARY build \
+  "${CLI_ARGS[@]}" \
+  -t "$image_tag" \
+  -f "$TEMP_DIR/Containerfile" \
+  "$BUILD_CONTEXT_DIR"
 
 # clean up tmp/configs
-rm -rf $REPO_CONFIGS_DIR
+rm -f "$BUILD_CONTEXT_DIR/run.yaml"
 set +x
 
-echo "Success! You can run it with: $DOCKER_BINARY $DOCKER_OPTS run -p 5000:5000 $image_name"
+echo "Success!"

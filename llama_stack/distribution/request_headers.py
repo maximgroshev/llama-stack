@@ -4,26 +4,55 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
+import contextvars
 import json
-import threading
-from typing import Any, Dict
+import logging
+from contextlib import AbstractContextManager
+from typing import Any
+
+from llama_stack.distribution.datatypes import User
 
 from .utils.dynamic import instantiate_class_type
 
-_THREAD_LOCAL = threading.local()
+log = logging.getLogger(__name__)
+
+# Context variable for request provider data and auth attributes
+PROVIDER_DATA_VAR = contextvars.ContextVar("provider_data", default=None)
+
+
+class RequestProviderDataContext(AbstractContextManager):
+    """Context manager for request provider data"""
+
+    def __init__(self, provider_data: dict[str, Any] | None = None, user: User | None = None):
+        self.provider_data = provider_data or {}
+        if user:
+            self.provider_data["__authenticated_user"] = user
+
+        self.token = None
+
+    def __enter__(self):
+        # Save the current value and set the new one
+        self.token = PROVIDER_DATA_VAR.set(self.provider_data)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore the previous value
+        if self.token is not None:
+            PROVIDER_DATA_VAR.reset(self.token)
 
 
 class NeedsRequestProviderData:
     def get_request_provider_data(self) -> Any:
         spec = self.__provider_spec__
-        assert spec, f"Provider spec not set on {self.__class__}"
+        if not spec:
+            raise ValueError(f"Provider spec not set on {self.__class__}")
 
         provider_type = spec.provider_type
         validator_class = spec.provider_data_validator
         if not validator_class:
             raise ValueError(f"Provider {provider_type} does not have a validator")
 
-        val = getattr(_THREAD_LOCAL, "provider_data_header_value", None)
+        val = PROVIDER_DATA_VAR.get()
         if not val:
             return None
 
@@ -32,26 +61,43 @@ class NeedsRequestProviderData:
             provider_data = validator(**val)
             return provider_data
         except Exception as e:
-            print("Error parsing provider data", e)
+            log.error(f"Error parsing provider data: {e}")
+            return None
 
 
-def set_request_provider_data(headers: Dict[str, str]):
+def parse_request_provider_data(headers: dict[str, str]) -> dict[str, Any] | None:
+    """Parse provider data from request headers"""
     keys = [
-        "X-LlamaStack-ProviderData",
-        "x-llamastack-providerdata",
+        "X-LlamaStack-Provider-Data",
+        "x-llamastack-provider-data",
     ]
+    val = None
     for key in keys:
         val = headers.get(key, None)
         if val:
             break
 
     if not val:
-        return
+        return None
 
     try:
-        val = json.loads(val)
+        return json.loads(val)
     except json.JSONDecodeError:
-        print("Provider data not encoded as a JSON object!", val)
-        return
+        log.error("Provider data not encoded as a JSON object!")
+        return None
 
-    _THREAD_LOCAL.provider_data_header_value = val
+
+def request_provider_data_context(
+    headers: dict[str, str], auth_attributes: dict[str, list[str]] | None = None
+) -> AbstractContextManager:
+    """Context manager that sets request provider data from headers and auth attributes for the duration of the context"""
+    provider_data = parse_request_provider_data(headers)
+    return RequestProviderDataContext(provider_data, auth_attributes)
+
+
+def get_authenticated_user() -> User | None:
+    """Helper to retrieve auth attributes from the provider data context"""
+    provider_data = PROVIDER_DATA_VAR.get()
+    if not provider_data:
+        return None
+    return provider_data.get("__authenticated_user")

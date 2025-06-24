@@ -4,41 +4,34 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from enum import Enum
-from typing import List, Optional
-
-import pkg_resources
-
-from llama_stack.distribution.utils.exec import run_with_pty
-from pydantic import BaseModel
-
-from termcolor import cprint
-
-from llama_stack.distribution.datatypes import *  # noqa: F403
+import importlib.resources
+import logging
+import sys
 from pathlib import Path
 
-from llama_stack.distribution.utils.config_dirs import BUILDS_BASE_DIR
-from llama_stack.distribution.distribution import get_provider_registry
+from pydantic import BaseModel
+from termcolor import cprint
 
+from llama_stack.distribution.datatypes import BuildConfig
+from llama_stack.distribution.distribution import get_provider_registry
+from llama_stack.distribution.utils.exec import run_command
+from llama_stack.distribution.utils.image_types import LlamaStackImageType
+from llama_stack.providers.datatypes import Api
+from llama_stack.templates.template import DistributionTemplate
+
+log = logging.getLogger(__name__)
 
 # These are the dependencies needed by the distribution server.
 # `llama-stack` is automatically installed by the installation script.
 SERVER_DEPENDENCIES = [
+    "aiosqlite",
     "fastapi",
     "fire",
     "httpx",
     "uvicorn",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
 ]
-
-
-class ImageType(Enum):
-    docker = "docker"
-    conda = "conda"
-
-
-class Dependencies(BaseModel):
-    pip_packages: List[str]
-    docker_image: Optional[str] = None
 
 
 class ApiInput(BaseModel):
@@ -46,78 +39,111 @@ class ApiInput(BaseModel):
     provider: str
 
 
-def build_image(build_config: BuildConfig, build_file_path: Path):
-    package_deps = Dependencies(
-        docker_image=build_config.distribution_spec.docker_image or "python:3.10-slim",
-        pip_packages=SERVER_DEPENDENCIES,
-    )
+def get_provider_dependencies(
+    config: BuildConfig | DistributionTemplate,
+) -> tuple[list[str], list[str]]:
+    """Get normal and special dependencies from provider configuration."""
+    if isinstance(config, DistributionTemplate):
+        config = config.build_config()
 
-    # extend package dependencies based on providers spec
-    all_providers = get_provider_registry()
-    for (
-        api_str,
-        provider_or_providers,
-    ) in build_config.distribution_spec.providers.items():
-        providers_for_api = all_providers[Api(api_str)]
+    providers = config.distribution_spec.providers
+    additional_pip_packages = config.additional_pip_packages
 
-        providers = (
-            provider_or_providers
-            if isinstance(provider_or_providers, list)
-            else [provider_or_providers]
-        )
+    deps = []
+    registry = get_provider_registry(config)
+    for api_str, provider_or_providers in providers.items():
+        providers_for_api = registry[Api(api_str)]
+
+        providers = provider_or_providers if isinstance(provider_or_providers, list) else [provider_or_providers]
 
         for provider in providers:
-            if provider not in providers_for_api:
-                raise ValueError(
-                    f"Provider `{provider}` is not available for API `{api_str}`"
-                )
+            # Providers from BuildConfig and RunConfig are subtly different - not great
+            provider_type = provider if isinstance(provider, str) else provider.provider_type
 
-            provider_spec = providers_for_api[provider]
-            package_deps.pip_packages.extend(provider_spec.pip_packages)
-            if provider_spec.docker_image:
-                raise ValueError("A stack's dependencies cannot have a docker image")
+            if provider_type not in providers_for_api:
+                raise ValueError(f"Provider `{provider}` is not available for API `{api_str}`")
 
+            provider_spec = providers_for_api[provider_type]
+            deps.extend(provider_spec.pip_packages)
+            if provider_spec.container_image:
+                raise ValueError("A stack's dependencies cannot have a container image")
+
+    normal_deps = []
     special_deps = []
-    deps = []
-    for package in package_deps.pip_packages:
+    for package in deps:
         if "--no-deps" in package or "--index-url" in package:
             special_deps.append(package)
         else:
-            deps.append(package)
-    deps = list(set(deps))
-    special_deps = list(set(special_deps))
+            normal_deps.append(package)
 
-    if build_config.image_type == ImageType.docker.value:
-        script = pkg_resources.resource_filename(
-            "llama_stack", "distribution/build_container.sh"
-        )
+    normal_deps.extend(additional_pip_packages or [])
+
+    return list(set(normal_deps)), list(set(special_deps))
+
+
+def print_pip_install_help(config: BuildConfig):
+    normal_deps, special_deps = get_provider_dependencies(config)
+
+    cprint(
+        f"Please install needed dependencies using the following commands:\n\nuv pip install {' '.join(normal_deps)}",
+        color="yellow",
+        file=sys.stderr,
+    )
+    for special_dep in special_deps:
+        cprint(f"uv pip install {special_dep}", color="yellow", file=sys.stderr)
+    print()
+
+
+def build_image(
+    build_config: BuildConfig,
+    build_file_path: Path,
+    image_name: str,
+    template_or_config: str,
+    run_config: str | None = None,
+):
+    container_base = build_config.distribution_spec.container_image or "python:3.12-slim"
+
+    normal_deps, special_deps = get_provider_dependencies(build_config)
+    normal_deps += SERVER_DEPENDENCIES
+
+    if build_config.image_type == LlamaStackImageType.CONTAINER.value:
+        script = str(importlib.resources.files("llama_stack") / "distribution/build_container.sh")
         args = [
             script,
-            build_config.name,
-            package_deps.docker_image,
-            str(build_file_path),
-            str(BUILDS_BASE_DIR / ImageType.docker.value),
-            " ".join(deps),
+            template_or_config,
+            image_name,
+            container_base,
+            " ".join(normal_deps),
         ]
-    else:
-        script = pkg_resources.resource_filename(
-            "llama_stack", "distribution/build_conda_env.sh"
-        )
+
+        # When building from a config file (not a template), include the run config path in the
+        # build arguments
+        if run_config is not None:
+            args.append(run_config)
+    elif build_config.image_type == LlamaStackImageType.CONDA.value:
+        script = str(importlib.resources.files("llama_stack") / "distribution/build_conda_env.sh")
         args = [
             script,
-            build_config.name,
+            str(image_name),
             str(build_file_path),
-            " ".join(deps),
+            " ".join(normal_deps),
+        ]
+    elif build_config.image_type == LlamaStackImageType.VENV.value:
+        script = str(importlib.resources.files("llama_stack") / "distribution/build_venv.sh")
+        args = [
+            script,
+            str(image_name),
+            " ".join(normal_deps),
         ]
 
     if special_deps:
         args.append("#".join(special_deps))
 
-    return_code = run_with_pty(args)
+    return_code = run_command(args)
+
     if return_code != 0:
-        cprint(
-            f"Failed to build target {build_config.name} with return code {return_code}",
-            color="red",
+        log.error(
+            f"Failed to build target {image_name} with return code {return_code}",
         )
 
     return return_code

@@ -4,13 +4,26 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from llama_models.llama3.api.datatypes import URL
-from llama_models.schema_utils import json_schema_type
+from datetime import datetime
+
 from pydantic import BaseModel
+
+from llama_stack.schema_utils import json_schema_type
+
+
+@json_schema_type
+class PostTrainingMetric(BaseModel):
+    epoch: int
+    train_loss: float
+    validation_loss: float
+    perplexity: float
 
 
 @json_schema_type(schema={"description": "Checkpoint created during training runs"})
 class Checkpoint(BaseModel):
-    iters: int
-    path: URL
+    identifier: str
+    created_at: datetime
     epoch: int
+    post_training_job_id: str
+    path: str
+    training_metrics: PostTrainingMetric | None = None

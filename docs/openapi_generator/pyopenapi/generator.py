@@ -6,12 +6,15 @@
 
 import hashlib
 import ipaddress
+import types
 import typing
+from dataclasses import make_dataclass
 from typing import Any, Dict, Set, Union
 
-from ..strong_typing.core import JsonType
-from ..strong_typing.docstring import Docstring, parse_type
-from ..strong_typing.inspection import (
+from llama_stack.apis.datatypes import Error
+from llama_stack.strong_typing.core import JsonType
+from llama_stack.strong_typing.docstring import Docstring, parse_type
+from llama_stack.strong_typing.inspection import (
     is_generic_list,
     is_type_optional,
     is_type_union,
@@ -19,15 +22,18 @@ from ..strong_typing.inspection import (
     unwrap_optional_type,
     unwrap_union_types,
 )
-from ..strong_typing.name import python_type_to_name
-from ..strong_typing.schema import (
+from llama_stack.strong_typing.name import python_type_to_name
+from llama_stack.strong_typing.schema import (
     get_schema_identifier,
     JsonSchemaGenerator,
     register_schema,
     Schema,
     SchemaOptions,
 )
-from ..strong_typing.serialization import json_dump_string, object_to_json
+from typing import get_origin, get_args
+from typing import Annotated
+from fastapi import UploadFile
+from llama_stack.strong_typing.serialization import json_dump_string, object_to_json
 
 from .operations import (
     EndpointOperation,
@@ -176,6 +182,34 @@ class ContentBuilder:
     ) -> Dict[str, MediaType]:
         "Creates the content subtree for a request or response."
 
+        def is_iterator_type(t):
+            return "StreamChunk" in str(t) or "OpenAIResponseObjectStream" in str(t)
+
+        def get_media_type(t):
+            if is_generic_list(t):
+                return "application/jsonl"
+            elif is_iterator_type(t):
+                return "text/event-stream"
+            else:
+                return "application/json"
+
+        if typing.get_origin(payload_type) in (typing.Union, types.UnionType):
+            media_types = []
+            item_types = []
+            for x in typing.get_args(payload_type):
+                media_types.append(get_media_type(x))
+                item_types.append(x)
+
+            if len(set(media_types)) == 1:
+                # all types have the same media type
+                return {media_types[0]: self.build_media_type(payload_type, examples)}
+            else:
+                # different types have different media types
+                return {
+                    media_type: self.build_media_type(item_type, examples)
+                    for media_type, item_type in zip(media_types, item_types)
+                }
+
         if is_generic_list(payload_type):
             media_type = "application/jsonl"
             item_type = unwrap_generic_list(payload_type)
@@ -190,7 +224,9 @@ class ContentBuilder:
     ) -> MediaType:
         schema = self.schema_builder.classdef_to_ref(item_type)
         if self.schema_transformer:
-            schema_transformer: Callable[[SchemaOrRef], SchemaOrRef] = self.schema_transformer  # type: ignore
+            schema_transformer: Callable[[SchemaOrRef], SchemaOrRef] = (
+                self.schema_transformer
+            )
             schema = schema_transformer(schema)
 
         if not examples:
@@ -219,7 +255,9 @@ class ContentBuilder:
             value = sample_transformer(object_to_json(example))
 
             hash_string = (
-                hashlib.md5(json_dump_string(value).encode("utf-8")).digest().hex()
+                hashlib.sha256(json_dump_string(value).encode("utf-8"))
+                .digest()
+                .hex()[:16]
             )
             name = f"ex-{hash_string}"
 
@@ -260,6 +298,20 @@ class StatusResponse:
     status_code: str
     types: List[type] = dataclasses.field(default_factory=list)
     examples: List[Any] = dataclasses.field(default_factory=list)
+
+
+def create_docstring_for_request(
+    request_name: str, fields: List[Tuple[str, type, Any]], doc_params: Dict[str, str]
+) -> str:
+    """Creates a ReST-style docstring for a dynamically generated request dataclass."""
+    lines = ["\n"]  # Short description
+
+    # Add parameter documentation in ReST format
+    for name, type_ in fields:
+        desc = doc_params.get(name, "")
+        lines.append(f":param {name}: {desc}")
+
+    return "\n".join(lines)
 
 
 class ResponseBuilder:
@@ -388,19 +440,90 @@ class Generator:
         self.schema_builder = SchemaBuilder(schema_generator)
         self.responses = {}
 
+        # Create standard error responses
+        self._create_standard_error_responses()
+
+    def _create_standard_error_responses(self) -> None:
+        """
+        Creates standard error responses that can be reused across operations.
+        These will be added to the components.responses section of the OpenAPI document.
+        """
+        # Get the Error schema
+        error_schema = self.schema_builder.classdef_to_ref(Error)
+
+        # Create standard error responses
+        self.responses["BadRequest400"] = Response(
+            description="The request was invalid or malformed",
+            content={
+                "application/json": MediaType(
+                    schema=error_schema,
+                    example={
+                        "status": 400,
+                        "title": "Bad Request",
+                        "detail": "The request was invalid or malformed",
+                    },
+                )
+            },
+        )
+
+        self.responses["TooManyRequests429"] = Response(
+            description="The client has sent too many requests in a given amount of time",
+            content={
+                "application/json": MediaType(
+                    schema=error_schema,
+                    example={
+                        "status": 429,
+                        "title": "Too Many Requests",
+                        "detail": "You have exceeded the rate limit. Please try again later.",
+                    },
+                )
+            },
+        )
+
+        self.responses["InternalServerError500"] = Response(
+            description="The server encountered an unexpected error",
+            content={
+                "application/json": MediaType(
+                    schema=error_schema,
+                    example={
+                        "status": 500,
+                        "title": "Internal Server Error",
+                        "detail": "An unexpected error occurred. Our team has been notified.",
+                    },
+                )
+            },
+        )
+
+        # Add a default error response for any unhandled error cases
+        self.responses["DefaultError"] = Response(
+            description="An unexpected error occurred",
+            content={
+                "application/json": MediaType(
+                    schema=error_schema,
+                    example={
+                        "status": 0,
+                        "title": "Error",
+                        "detail": "An unexpected error occurred",
+                    },
+                )
+            },
+        )
+
     def _build_type_tag(self, ref: str, schema: Schema) -> Tag:
-        definition = f'<SchemaDefinition schemaRef="#/components/schemas/{ref}" />'
+        # Don't include schema definition in the tag description because for one,
+        # it is not very valuable and for another, it causes string formatting
+        # discrepancies via the Stainless Studio.
+        #
+        # definition = f'<SchemaDefinition schemaRef="#/components/schemas/{ref}" />'
         title = typing.cast(str, schema.get("title"))
         description = typing.cast(str, schema.get("description"))
         return Tag(
             name=ref,
-            description="\n\n".join(
-                s for s in (title, description, definition) if s is not None
-            ),
+            description="\n\n".join(s for s in (title, description) if s is not None),
         )
 
     def _build_extra_tag_groups(
-        self, extra_types: Dict[str, List[type]]
+        self, extra_types: Dict[str, Dict[str, type]]
     ) -> Dict[str, List[Tag]]:
         """
         Creates a dictionary of tag group captions as keys, and tag lists as values.
@@ -413,9 +536,8 @@ class Generator:
         for category_name, category_items in extra_types.items():
             tag_list: List[Tag] = []
 
-            for extra_type in category_items:
-                name = python_type_to_name(extra_type)
-                schema = self.schema_builder.classdef_to_named_schema(name, extra_type)
+            for name, extra_type in category_items.items():
+                schema = self.schema_builder.classdef_to_schema(extra_type)
                 tag_list.append(self._build_type_tag(name, schema))
 
             if tag_list:
@@ -424,6 +546,18 @@ class Generator:
         return extra_tags
 
     def _build_operation(self, op: EndpointOperation) -> Operation:
+        if op.defining_class.__name__ in [
+            "SyntheticDataGeneration",
+            "PostTraining",
+            "BatchInference",
+        ]:
+            op.defining_class.__name__ = f"{op.defining_class.__name__} (Coming Soon)"
+            print(op.defining_class.__name__)
+
+        # TODO (xiyan): temporary fix for datasetio inner impl + datasets api
+        # if op.defining_class.__name__ in ["DatasetIO"]:
+        #     op.defining_class.__name__ = "Datasets"
+
         doc_string = parse_type(op.func_ref)
         doc_params = dict(
             (param.name, param.description) for param in doc_string.params.values()
@@ -462,27 +596,94 @@ class Generator:
 
         # parameters passed anywhere
         parameters = path_parameters + query_parameters
-        parameters += [
-            Parameter(
-                name="X-LlamaStack-ProviderData",
-                in_=ParameterLocation.Header,
-                description="JSON-encoded provider data which will be made available to the adapter servicing the API",
-                required=False,
-                schema=self.schema_builder.classdef_to_ref(str),
-            )
-        ]
 
-        # data passed in payload
-        if op.request_params:
+        webmethod = getattr(op.func_ref, "__webmethod__", None)
+        raw_bytes_request_body = False
+        if webmethod:
+            raw_bytes_request_body = getattr(webmethod, "raw_bytes_request_body", False)
+
+        # data passed in request body as raw bytes cannot have request parameters
+        if raw_bytes_request_body and op.request_params:
+            raise ValueError(
+                "Cannot have both raw bytes request body and request parameters"
+            )
+
+        # data passed in request body as raw bytes
+        if raw_bytes_request_body:
+            requestBody = RequestBody(
+                content={
+                    "application/octet-stream": {
+                        "schema": {
+                            "type": "string",
+                            "format": "binary",
+                        }
+                    }
+                },
+                required=True,
+            )
+        # data passed in request body as multipart/form-data
+        elif op.multipart_params:
+            builder = ContentBuilder(self.schema_builder)
+            
+            # Create schema properties for multipart form fields
+            properties = {}
+            required_fields = []
+            
+            for name, param_type in op.multipart_params:
+                if get_origin(param_type) is Annotated:
+                    base_type = get_args(param_type)[0]
+                else:
+                    base_type = param_type
+                if base_type is UploadFile:
+                    # File upload
+                    properties[name] = {
+                        "type": "string",
+                        "format": "binary"
+                    }
+                else:
+                    # Form field
+                    properties[name] = self.schema_builder.classdef_to_ref(base_type)
+                
+                required_fields.append(name)
+            
+            multipart_schema = {
+                "type": "object",
+                "properties": properties,
+                "required": required_fields
+            }
+            
+            requestBody = RequestBody(
+                content={
+                    "multipart/form-data": {
+                        "schema": multipart_schema
+                    }
+                },
+                required=True,
+            )
+        # data passed in payload as JSON and mapped to request parameters
+        elif op.request_params:
             builder = ContentBuilder(self.schema_builder)
             first = next(iter(op.request_params))
             request_name, request_type = first
 
-            from dataclasses import make_dataclass
-
             op_name = "".join(word.capitalize() for word in op.name.split("_"))
             request_name = f"{op_name}Request"
-            request_type = make_dataclass(request_name, op.request_params)
+            fields = [
+                (
+                    name,
+                    type_,
+                )
+                for name, type_ in op.request_params
+            ]
+            request_type = make_dataclass(
+                request_name,
+                fields,
+                namespace={
+                    "__doc__": create_docstring_for_request(
+                        request_name, fields, doc_params
+                    )
+                },
+            )
 
             requestBody = RequestBody(
                 content={
@@ -506,7 +707,6 @@ class Generator:
             success_type_descriptions = {
                 item: doc_string.short_description
                 for item, doc_string in success_type_docstring.items()
-                if doc_string.short_description
             }
         else:
             # use return type as a single response type
@@ -565,6 +765,19 @@ class Generator:
             )
             responses.update(response_builder.build_response(response_options))
 
+        assert len(responses.keys()) > 0, f"No responses found for {op.name}"
+
+        # Add standard error response references
+        if self.options.include_standard_error_responses:
+            if "400" not in responses:
+                responses["400"] = ResponseRef("BadRequest400")
+            if "429" not in responses:
+                responses["429"] = ResponseRef("TooManyRequests429")
+            if "500" not in responses:
+                responses["500"] = ResponseRef("InternalServerError500")
+            if "default" not in responses:
+                responses["default"] = ResponseRef("DefaultError")
+
         if op.event_type is not None:
             builder = ContentBuilder(self.schema_builder)
             callbacks = {
@@ -583,14 +796,20 @@ class Generator:
         else:
             callbacks = None
 
+        description = "\n".join(
+            filter(None, [doc_string.short_description, doc_string.long_description])
+        )
+
         return Operation(
-            tags=[op.defining_class.__name__],
-            summary=doc_string.short_description,
-            description=doc_string.long_description,
+            tags=[getattr(op.defining_class, "API_NAMESPACE", op.defining_class.__name__)],
+            summary=None,
+            # summary=doc_string.short_description,
+            description=description,
             parameters=parameters,
             requestBody=requestBody,
             responses=responses,
             callbacks=callbacks,
+            deprecated=True if "DEPRECATED" in op.func_name else None,
             security=[] if op.public else None,
         )
 
@@ -618,6 +837,8 @@ class Generator:
                 raise NotImplementedError(f"unknown HTTP method: {op.http_method}")
 
             route = op.get_route()
+            route = route.replace(":path", "")
+            print(f"route: {route}")
             if route in paths:
                 paths[route].update(pathItem)
             else:
@@ -626,6 +847,8 @@ class Generator:
         operation_tags: List[Tag] = []
         for cls in endpoint_classes:
             doc_string = parse_type(cls)
+            if hasattr(cls, "API_NAMESPACE") and cls.API_NAMESPACE != cls.__name__:
+                continue
             operation_tags.append(
                 Tag(
                     name=cls.__name__,
@@ -633,12 +856,6 @@ class Generator:
                     displayName=doc_string.short_description,
                 )
             )
-
-        # types that are produced/consumed by operations
-        type_tags = [
-            self._build_type_tag(ref, schema)
-            for ref, schema in self.schema_builder.schemas.items()
-        ]
 
         # types that are emitted by events
         event_tags: List[Tag] = []
@@ -666,10 +883,11 @@ class Generator:
         # list all operations and types
         tags: List[Tag] = []
         tags.extend(operation_tags)
-        tags.extend(type_tags)
         tags.extend(event_tags)
         for extra_tag_group in extra_tag_groups.values():
             tags.extend(extra_tag_group)
+
+        tags = sorted(tags, key=lambda t: t.name)
 
         tag_groups = []
         if operation_tags:
@@ -677,13 +895,6 @@ class Generator:
                 TagGroup(
                     name=self.options.map("Operations"),
                     tags=sorted(tag.name for tag in operation_tags),
-                )
-            )
-        if type_tags:
-            tag_groups.append(
-                TagGroup(
-                    name=self.options.map("Types"),
-                    tags=sorted(tag.name for tag in type_tags),
                 )
             )
         if event_tags:
@@ -696,7 +907,7 @@ class Generator:
         for caption, extra_tag_group in extra_tag_groups.items():
             tag_groups.append(
                 TagGroup(
-                    name=self.options.map(caption),
+                    name=caption,
                     tags=sorted(tag.name for tag in extra_tag_group),
                 )
             )

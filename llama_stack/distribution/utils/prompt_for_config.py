@@ -6,21 +6,21 @@
 
 import inspect
 import json
+import logging
 from enum import Enum
-
-from typing import Any, get_args, get_origin, List, Literal, Optional, Type, Union
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefinedType
 
-from typing_extensions import Annotated
+log = logging.getLogger(__name__)
 
 
 def is_list_of_primitives(field_type):
     """Check if a field type is a List of primitive types."""
     origin = get_origin(field_type)
-    if origin is List or origin is list:
+    if origin is list or origin is list:
         args = get_args(field_type)
         if len(args) == 1 and args[0] in (int, float, str, bool):
             return True
@@ -28,15 +28,11 @@ def is_list_of_primitives(field_type):
 
 
 def is_basemodel_without_fields(typ):
-    return (
-        inspect.isclass(typ) and issubclass(typ, BaseModel) and len(typ.__fields__) == 0
-    )
+    return inspect.isclass(typ) and issubclass(typ, BaseModel) and len(typ.__fields__) == 0
 
 
 def can_recurse(typ):
-    return (
-        inspect.isclass(typ) and issubclass(typ, BaseModel) and len(typ.__fields__) > 0
-    )
+    return inspect.isclass(typ) and issubclass(typ, BaseModel) and len(typ.__fields__) > 0
 
 
 def get_literal_values(field):
@@ -56,7 +52,7 @@ def get_non_none_type(field_type):
     return next(arg for arg in get_args(field_type) if arg is not type(None))
 
 
-def manually_validate_field(model: Type[BaseModel], field_name: str, value: Any):
+def manually_validate_field(model: type[BaseModel], field_name: str, value: Any):
     validators = model.__pydantic_decorators__.field_validators
     for _name, validator in validators.items():
         if field_name in validator.info.fields:
@@ -69,7 +65,7 @@ def is_discriminated_union(typ) -> bool:
     if isinstance(typ, FieldInfo):
         return typ.discriminator
     else:
-        if not (get_origin(typ) is Annotated):
+        if get_origin(typ) is not Annotated:
             return False
         args = get_args(typ)
         return len(args) >= 2 and args[1].discriminator
@@ -111,11 +107,9 @@ def prompt_for_discriminated_union(
 
         if discriminator_value in type_map:
             chosen_type = type_map[discriminator_value]
-            print(f"\nConfiguring {chosen_type.__name__}:")
+            log.info(f"\nConfiguring {chosen_type.__name__}:")
 
-            if existing_value and (
-                getattr(existing_value, discriminator) != discriminator_value
-            ):
+            if existing_value and (getattr(existing_value, discriminator) != discriminator_value):
                 existing_value = None
 
             sub_config = prompt_for_config(chosen_type, existing_value)
@@ -123,7 +117,7 @@ def prompt_for_discriminated_union(
             setattr(sub_config, discriminator, discriminator_value)
             return sub_config
         else:
-            print(f"Invalid {discriminator}. Please try again.")
+            log.error(f"Invalid {discriminator}. Please try again.")
 
 
 # This is somewhat elaborate, but does not purport to be comprehensive in any way.
@@ -131,9 +125,7 @@ def prompt_for_discriminated_union(
 #
 # doesn't support List[nested_class] yet or Dicts of any kind. needs a bunch of
 # unit tests for coverage.
-def prompt_for_config(
-    config_type: type[BaseModel], existing_config: Optional[BaseModel] = None
-) -> BaseModel:
+def prompt_for_config(config_type: type[BaseModel], existing_config: BaseModel | None = None) -> BaseModel:
     """
     Recursively prompt the user for configuration values based on a Pydantic BaseModel.
 
@@ -147,17 +139,11 @@ def prompt_for_config(
 
     for field_name, field in config_type.__fields__.items():
         field_type = field.annotation
-        existing_value = (
-            getattr(existing_config, field_name) if existing_config else None
-        )
+        existing_value = getattr(existing_config, field_name) if existing_config else None
         if existing_value:
             default_value = existing_value
         else:
-            default_value = (
-                field.default
-                if not isinstance(field.default, PydanticUndefinedType)
-                else None
-            )
+            default_value = field.default if not isinstance(field.default, PydanticUndefinedType) else None
         is_required = field.is_required
 
         # Skip fields with Literal type
@@ -180,15 +166,11 @@ def prompt_for_config(
                     config_data[field_name] = validated_value
                     break
                 except KeyError:
-                    print(
-                        f"Invalid choice. Please choose from: {', '.join(e.name for e in field_type)}"
-                    )
+                    log.error(f"Invalid choice. Please choose from: {', '.join(e.name for e in field_type)}")
             continue
 
         if is_discriminated_union(field):
-            config_data[field_name] = prompt_for_discriminated_union(
-                field_name, field, existing_value
-            )
+            config_data[field_name] = prompt_for_discriminated_union(field_name, field, existing_value)
             continue
 
         if is_optional(field_type) and can_recurse(get_non_none_type(field_type)):
@@ -197,11 +179,9 @@ def prompt_for_config(
                 config_data[field_name] = None
                 continue
             nested_type = get_non_none_type(field_type)
-            print(f"Entering sub-configuration for {field_name}:")
+            log.info(f"Entering sub-configuration for {field_name}:")
             config_data[field_name] = prompt_for_config(nested_type, existing_value)
-        elif is_optional(field_type) and is_discriminated_union(
-            get_non_none_type(field_type)
-        ):
+        elif is_optional(field_type) and is_discriminated_union(get_non_none_type(field_type)):
             prompt = f"Do you want to configure {field_name}? (y/n): "
             if input(prompt).lower() == "n":
                 config_data[field_name] = None
@@ -213,7 +193,7 @@ def prompt_for_config(
                 existing_value,
             )
         elif can_recurse(field_type):
-            print(f"\nEntering sub-configuration for {field_name}:")
+            log.info(f"\nEntering sub-configuration for {field_name}:")
             config_data[field_name] = prompt_for_config(
                 field_type,
                 existing_value,
@@ -240,7 +220,7 @@ def prompt_for_config(
                         config_data[field_name] = None
                         break
                     else:
-                        print("This field is required. Please provide a value.")
+                        log.error("This field is required. Please provide a value.")
                         continue
                 else:
                     try:
@@ -257,39 +237,29 @@ def prompt_for_config(
                             try:
                                 value = json.loads(user_input)
                                 if not isinstance(value, list):
-                                    raise ValueError(
-                                        "Input must be a JSON-encoded list"
-                                    )
+                                    raise ValueError("Input must be a JSON-encoded list")
                                 element_type = get_args(field_type)[0]
                                 value = [element_type(item) for item in value]
 
                             except json.JSONDecodeError:
-                                print(
-                                    'Invalid JSON. Please enter a valid JSON-encoded list e.g., ["foo","bar"]'
-                                )
+                                log.error('Invalid JSON. Please enter a valid JSON-encoded list e.g., ["foo","bar"]')
                                 continue
                             except ValueError as e:
-                                print(f"{str(e)}")
+                                log.error(f"{str(e)}")
                                 continue
 
                         elif get_origin(field_type) is dict:
                             try:
                                 value = json.loads(user_input)
                                 if not isinstance(value, dict):
-                                    raise ValueError(
-                                        "Input must be a JSON-encoded dictionary"
-                                    )
+                                    raise ValueError("Input must be a JSON-encoded dictionary")
 
                             except json.JSONDecodeError:
-                                print(
-                                    "Invalid JSON. Please enter a valid JSON-encoded dict."
-                                )
+                                log.error("Invalid JSON. Please enter a valid JSON-encoded dict.")
                                 continue
 
                         # Convert the input to the correct type
-                        elif inspect.isclass(field_type) and issubclass(
-                            field_type, BaseModel
-                        ):
+                        elif inspect.isclass(field_type) and issubclass(field_type, BaseModel):
                             # For nested BaseModels, we assume a dictionary-like string input
                             import ast
 
@@ -298,19 +268,15 @@ def prompt_for_config(
                             value = field_type(user_input)
 
                     except ValueError:
-                        print(
-                            f"Invalid input. Expected type: {getattr(field_type, '__name__', str(field_type))}"
-                        )
+                        log.error(f"Invalid input. Expected type: {getattr(field_type, '__name__', str(field_type))}")
                         continue
 
                 try:
                     # Validate the field using our manual validation function
-                    validated_value = manually_validate_field(
-                        config_type, field_name, value
-                    )
+                    validated_value = manually_validate_field(config_type, field_name, value)
                     config_data[field_name] = validated_value
                     break
                 except ValueError as e:
-                    print(f"Validation error: {str(e)}")
+                    log.error(f"Validation error: {str(e)}")
 
     return config_type(**config_data)

@@ -4,9 +4,8 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from typing import List
 
-from llama_stack.distribution.datatypes import (
+from llama_stack.providers.datatypes import (
     AdapterSpec,
     Api,
     InlineProviderSpec,
@@ -15,50 +14,63 @@ from llama_stack.distribution.datatypes import (
 )
 
 
-def available_providers() -> List[ProviderSpec]:
+def available_providers() -> list[ProviderSpec]:
     return [
         InlineProviderSpec(
             api=Api.safety,
-            provider_type="meta-reference",
+            provider_type="inline::prompt-guard",
             pip_packages=[
-                "codeshield",
-                "transformers",
+                "transformers[accelerate]",
                 "torch --index-url https://download.pytorch.org/whl/cpu",
             ],
-            module="llama_stack.providers.impls.meta_reference.safety",
-            config_class="llama_stack.providers.impls.meta_reference.safety.SafetyConfig",
+            module="llama_stack.providers.inline.safety.prompt_guard",
+            config_class="llama_stack.providers.inline.safety.prompt_guard.PromptGuardConfig",
+        ),
+        InlineProviderSpec(
+            api=Api.safety,
+            provider_type="inline::llama-guard",
+            pip_packages=[],
+            module="llama_stack.providers.inline.safety.llama_guard",
+            config_class="llama_stack.providers.inline.safety.llama_guard.LlamaGuardConfig",
             api_dependencies=[
                 Api.inference,
             ],
         ),
-        remote_provider_spec(
+        InlineProviderSpec(
             api=Api.safety,
-            adapter=AdapterSpec(
-                adapter_type="sample",
-                pip_packages=[],
-                module="llama_stack.providers.adapters.safety.sample",
-                config_class="llama_stack.providers.adapters.safety.sample.SampleConfig",
-            ),
+            provider_type="inline::code-scanner",
+            pip_packages=[
+                "codeshield",
+            ],
+            module="llama_stack.providers.inline.safety.code_scanner",
+            config_class="llama_stack.providers.inline.safety.code_scanner.CodeScannerConfig",
         ),
         remote_provider_spec(
             api=Api.safety,
             adapter=AdapterSpec(
                 adapter_type="bedrock",
                 pip_packages=["boto3"],
-                module="llama_stack.providers.adapters.safety.bedrock",
-                config_class="llama_stack.providers.adapters.safety.bedrock.BedrockSafetyConfig",
+                module="llama_stack.providers.remote.safety.bedrock",
+                config_class="llama_stack.providers.remote.safety.bedrock.BedrockSafetyConfig",
             ),
         ),
         remote_provider_spec(
             api=Api.safety,
             adapter=AdapterSpec(
-                adapter_type="together",
-                pip_packages=[
-                    "together",
-                ],
-                module="llama_stack.providers.adapters.safety.together",
-                config_class="llama_stack.providers.adapters.safety.together.TogetherSafetyConfig",
-                provider_data_validator="llama_stack.providers.adapters.safety.together.TogetherProviderDataValidator",
+                adapter_type="nvidia",
+                pip_packages=["requests"],
+                module="llama_stack.providers.remote.safety.nvidia",
+                config_class="llama_stack.providers.remote.safety.nvidia.NVIDIASafetyConfig",
+            ),
+        ),
+        remote_provider_spec(
+            api=Api.safety,
+            adapter=AdapterSpec(
+                adapter_type="sambanova",
+                pip_packages=["litellm"],
+                module="llama_stack.providers.remote.safety.sambanova",
+                config_class="llama_stack.providers.remote.safety.sambanova.SambaNovaSafetyConfig",
+                provider_data_validator="llama_stack.providers.remote.safety.sambanova.config.SambaNovaProviderDataValidator",
             ),
         ),
     ]

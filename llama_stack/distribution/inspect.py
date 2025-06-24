@@ -4,51 +4,79 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from typing import Dict, List
-from llama_stack.apis.inspect import *  # noqa: F403
+from importlib.metadata import version
+
+from pydantic import BaseModel
+
+from llama_stack.apis.inspect import (
+    HealthInfo,
+    Inspect,
+    ListRoutesResponse,
+    RouteInfo,
+    VersionInfo,
+)
+from llama_stack.distribution.datatypes import StackRunConfig
+from llama_stack.distribution.server.routes import get_all_api_routes
+from llama_stack.providers.datatypes import HealthStatus
 
 
-from llama_stack.distribution.distribution import get_provider_registry
-from llama_stack.distribution.server.endpoints import get_all_api_endpoints
-from llama_stack.providers.datatypes import *  # noqa: F403
+class DistributionInspectConfig(BaseModel):
+    run_config: StackRunConfig
 
 
-def is_passthrough(spec: ProviderSpec) -> bool:
-    return isinstance(spec, RemoteProviderSpec) and spec.adapter is None
+async def get_provider_impl(config, deps):
+    impl = DistributionInspectImpl(config, deps)
+    await impl.initialize()
+    return impl
 
 
 class DistributionInspectImpl(Inspect):
-    def __init__(self):
+    def __init__(self, config: DistributionInspectConfig, deps):
+        self.config = config
+        self.deps = deps
+
+    async def initialize(self) -> None:
         pass
 
-    async def list_providers(self) -> Dict[str, List[ProviderInfo]]:
-        ret = {}
-        all_providers = get_provider_registry()
-        for api, providers in all_providers.items():
-            ret[api.value] = [
-                ProviderInfo(
-                    provider_type=p.provider_type,
-                    description="Passthrough" if is_passthrough(p) else "",
-                )
-                for p in providers.values()
-            ]
+    async def list_routes(self) -> ListRoutesResponse:
+        run_config: StackRunConfig = self.config.run_config
 
-        return ret
-
-    async def list_routes(self) -> Dict[str, List[RouteInfo]]:
-        ret = {}
-        all_endpoints = get_all_api_endpoints()
-
+        ret = []
+        all_endpoints = get_all_api_routes()
         for api, endpoints in all_endpoints.items():
-            ret[api.value] = [
-                RouteInfo(
-                    route=e.route,
-                    method=e.method,
-                    providers=[],
+            # Always include provider and inspect APIs, filter others based on run config
+            if api.value in ["providers", "inspect"]:
+                ret.extend(
+                    [
+                        RouteInfo(
+                            route=e.path,
+                            method=next(iter([m for m in e.methods if m != "HEAD"])),
+                            provider_types=[],  # These APIs don't have "real" providers - they're internal to the stack
+                        )
+                        for e in endpoints
+                    ]
                 )
-                for e in endpoints
-            ]
-        return ret
+            else:
+                providers = run_config.providers.get(api.value, [])
+                if providers:  # Only process if there are providers for this API
+                    ret.extend(
+                        [
+                            RouteInfo(
+                                route=e.path,
+                                method=next(iter([m for m in e.methods if m != "HEAD"])),
+                                provider_types=[p.provider_type for p in providers],
+                            )
+                            for e in endpoints
+                        ]
+                    )
+
+        return ListRoutesResponse(data=ret)
 
     async def health(self) -> HealthInfo:
-        return HealthInfo(status="OK")
+        return HealthInfo(status=HealthStatus.OK)
+
+    async def version(self) -> VersionInfo:
+        return VersionInfo(version=version("llama-stack"))
+
+    async def shutdown(self) -> None:
+        pass
