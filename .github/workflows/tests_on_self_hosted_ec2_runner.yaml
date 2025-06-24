@@ -1,4 +1,4 @@
-name: Llama Recipes PyTest tests.
+name: Llama Stack tests on Self-Hosted EC2 Runner.
 run-name: ${{ github.actor }} Triggered Action.
 on:
 #   pull_request:
@@ -21,7 +21,7 @@ on:
 env:
   AWS_REGION : "us-west-2"
   AWS_ACCOUNT: "320567679581"
-  AWS_SUBNET_ID: "subnet-052cc9eed3a81fe9f" 
+  AWS_SUBNET_ID: "subnet-02441523fed853ccf"
   AWS_EC2_TYPE: "t2.large"
   AWS_EC2_AMI: "ami-0a2a52c3564b58a29" # ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20230516
   AWS_SG_ID: "sg-058aeb730e616fedb"
