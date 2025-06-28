@@ -17,6 +17,10 @@ on:
         description: 'AMI Image (use default if unsure)'
         required: true 
         default: "ami-05f991c49d264708f" # Ubuntu Server 24.04 LTS (HVM), SSD Volume Type
+      aws_sg_id:
+        description: 'Security Group ID to be attached to the selg Hosted runner (use default if unsure)'
+        required: true 
+        default: "sg-0f1e12826ee9b097b"
         
 env:
   AWS_REGION : "us-west-2"
@@ -47,11 +51,13 @@ jobs:
         run: |
           echo "AWS_EC2_TYPE=${{ inputs.aws_ec2_type }}" >> $GITHUB_ENV
           echo "AWS_EC2_AMI=${{ inputs.aws_ec2_ami }}" >> $GITHUB_ENV
+          echo "AWS_SG_ID=${{ inputs.aws_sg_id }}" >> $GITHUB_ENV
 
       - name: "DEBUG: AWS_EC2_TYPE and AWS_EC2_AMI env variables values"
         run: |
           echo ${{ env.AWS_EC2_TYPE }}
           echo ${{ env.AWS_EC2_AMI }}
+          echo ${{ env.AWS_SG_ID }}
 
       - name: Configure AWS credentials
         id: configure_aws_security_credentials
