@@ -70,8 +70,8 @@ class QdrantIndex(EmbeddingIndex):
             )
 
         points = []
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=False)):
-            chunk_id = f"{chunk.metadata['document_id']}:chunk-{i}"
+        for _i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=False)):
+            chunk_id = chunk.chunk_id
             points.append(
                 PointStruct(
                     id=convert_id(chunk_id),
@@ -256,6 +256,7 @@ class QdrantVectorIOAdapter(VectorIO, VectorDBsProtocolPrivate):
         max_num_results: int | None = 10,
         ranking_options: SearchRankingOptions | None = None,
         rewrite_query: bool | None = False,
+        search_mode: str | None = "vector",
     ) -> VectorStoreSearchResponsePage:
         raise NotImplementedError("OpenAI Vector Stores API is not supported in Qdrant")
 

@@ -4,7 +4,7 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from llama_stack.apis.models.models import ModelType
+from llama_stack.apis.models import ModelType
 from llama_stack.models.llama.sku_types import CoreModelId
 from llama_stack.providers.utils.inference.model_registry import (
     ProviderModelEntry,
@@ -84,7 +84,7 @@ MODEL_ENTRIES = [
         CoreModelId.llama_guard_3_1b.value,
     ),
     ProviderModelEntry(
-        provider_model_id="all-minilm:latest",
+        provider_model_id="all-minilm:l6-v2",
         aliases=["all-minilm"],
         model_type=ModelType.embedding,
         metadata={
