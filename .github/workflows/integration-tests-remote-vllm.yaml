@@ -1,18 +1,6 @@
 name: Integration Tests with remote vLLM Inference Server
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'llama_stack/**'
-      - 'tests/integration/**'
-      - 'uv.lock'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '.github/workflows/integration-tests.yml' # This workflow
-
   workflow_dispatch: # Only triggering workflow manually.
     inputs:
       vllm_server_ip:
@@ -20,20 +8,17 @@ on:
         required: true
         default: "0.0.0.0"
 
-    #   runner:
-    #     description: 'GHA Runner Scale Set to run workflow on.'
-    #     required: true
-    #     default: gha-runner-scale-set-nvidia-single-gpu
-
-    #   debug:
-    #       description: 'Run debugging steps?'
-    #       required: false
-    #       default: "true"
-
-      sleep_time:
-        description: '[DEBUG] sleep time for debugging'
-        required: true
-        default: "5"
+#   push:
+#     branches: [ main ]
+#   pull_request:
+#     branches: [ main ]
+#     paths:
+#       - 'llama_stack/**'
+#       - 'tests/integration/**'
+#       - 'uv.lock'
+#       - 'pyproject.toml'
+#       - 'requirements.txt'
+#       - '.github/workflows/integration-tests.yml' # This workflow
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -70,7 +55,7 @@ jobs:
         run: |
           echo "Verifying vLLM status..."
           vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ github.event.inputs.vllm_server_ip }}:8000/health)
-          echo "vLLM /health status: $vllm_status"
+          echo "vLLM remote server /health status: $vllm_status"
           if [ "$vllm_status" != "200" ]; then
             echo "vLLM health check failed"
             exit 1
@@ -90,7 +75,15 @@ jobs:
           VLLM_API_TOKEN: "remote_vllm"
         run: |
           ls -la ./llama_stack/templates
-          LLAMA_STACK_LOG_FILE=server.log nohup uv run llama stack run ~/.llama/distributions/starter/starter-run.yaml --image-type venv --env ENABLE_VLLM=${{ env.ENABLE_VLLM }} --env VLLM_URL=${{ env.VLLM_URL }} --env VLLM_INFERENCE_MODEL=${{ env.VLLM_INFERENCE_MODEL }}  --env VLLM_API_TOKEN=${{ env.VLLM_API_TOKEN }} &
+          echo "GITHUB_WORKSPACE ${GITHUB_WORKSPACE}"
+          echo "github.workspace ${{ github.workspace }}"
+
+          LLAMA_STACK_LOG_FILE=server.log nohup uv run llama stack run $GITHUB_WORKSPACE/llama_stack/templates/starter/run.yaml \
+            --image-type venv \
+            --env ENABLE_VLLM=${{ env.ENABLE_VLLM }} \
+            --env VLLM_URL=${{ env.VLLM_URL }} \
+            --env VLLM_INFERENCE_MODEL=${{ env.VLLM_INFERENCE_MODEL }}  \
+            --env VLLM_API_TOKEN=${{ env.VLLM_API_TOKEN }} &
 
       - name: Wait for Llama Stack server to be ready
         if: matrix.client-type == 'http'
@@ -123,6 +116,30 @@ jobs:
         run: |
           free -h
           df -h
+
+      - name: Run Integration Tests
+        env:
+          INFERENCE_MODEL: "meta-llama/Llama-3.2-3B-Instruct"
+          ENABLE_VLLM: "vllm"
+          VLLM_URL: "http://${{ github.event.inputs.vllm_server_ip }}:8000/v1/"
+          VLLM_INFERENCE_MODEL: "meta-llama/Llama-3.2-3B-Instruct"
+          VLLM_API_TOKEN: "remote_vllm"
+        run: |
+          if [ "${{ matrix.client-type }}" == "library" ]; then
+            stack_config="starter"
+          else
+            stack_config="server:starter"
+          fi
+          uv run pytest -s -v tests/integration/${{ matrix.test-type }} --stack-config=${stack_config} \
+            -k "not(builtin_tool or safety_with_image or code_interpreter or test_rag)" \
+            --text-model="vllm/${{ env.INFERENCE_MODEL }}" \
+            --env ENABLE_VLLM=${{ env.ENABLE_VLLM }} \
+            --env VLLM_URL=${{ env.VLLM_URL }} \
+            --env VLLM_INFERENCE_MODEL=${{ env.VLLM_INFERENCE_MODEL }}  \
+            --env VLLM_API_TOKEN=${{ env.VLLM_API_TOKEN }} \
+            --embedding-model=all-MiniLM-L6-v2 \
+            --color=yes \
+            --capture=tee-sys | tee pytest-${{ matrix.test-type }}.log
 
     #   - name: Run Integration Tests
     #     env:
