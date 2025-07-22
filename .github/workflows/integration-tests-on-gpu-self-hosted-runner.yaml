@@ -60,9 +60,9 @@ jobs:
         uses: ./.github/actions/setup-vllm
         with:
           model: ${{github.event.inputs.model }}
+          huggingface_pat: ${{ secrets.HF_PAT }}
 
       - name: Verify VLLM remote server is healthy
-        # if: matrix.client-type == 'http'
         run: |
           echo "Verifying vLLM status..."
           vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ github.event.inputs.vllm_server_ip }}:8000/health)

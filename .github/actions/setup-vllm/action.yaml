@@ -21,6 +21,11 @@ inputs:
     description: Model Tool Calling parser 
     required: true
     default: llama3_json
+  
+  huggingface_pat:
+    description: HuggingFace Personal Access Token
+    required: true
+    default: N/A
 
 runs:
   using: "composite"
@@ -39,7 +44,7 @@ runs:
         echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
         sudo docker run --runtime nvidia --gpus all \
             -v ~/.cache/huggingface:/root/.cache/huggingface \
-            --env "HUGGING_FACE_HUB_TOKEN=${{ secrets.HF_PAT }}" \
+            --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface_pat }}" \
             -p 8000:8000 \
             --ipc=host \
             vllm/vllm-openai:${{ inputs.vllm-image-version }} \
