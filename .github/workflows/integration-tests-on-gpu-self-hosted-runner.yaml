@@ -3,6 +3,12 @@ name: "[Self-Hosted runner] Integration Tests vLLM Inference Server"
 on:
   workflow_dispatch: # Only triggering workflow manually.
     inputs:
+
+      model:
+        description: Model to serve by vLLM Inference Server
+        required: true
+        default: meta-llama/Llama-3.2-3B-Instruct
+
       vllm_server_ip:
         description: IP address of the vLLM Inference Server
         required: true
@@ -50,36 +56,19 @@ jobs:
           env
           echo "USER: $USER"
 
-      - name: "[DEBUG] Configuring docker: "
+      - name: Setup ollama
+        uses: ./.github/actions/setup-vllm
+        with:
+          model: ${{github.event.inputs.model }}
+
+      - name: Verify VLLM remote server is healthy
+        # if: matrix.client-type == 'http'
         run: |
-          echo "Docker: "
-          which docker
-          sudo docker ps -a
-
-          # adding $USER to a docker security
-          # sudo groupadd docker
-          sudo usermod -aG docker $USER
-          newgrp docker
-
-          docker ps -a
-
-
-      # - name: Install dependencies
-      #   uses: ./.github/actions/setup-runner
-      #   with:
-      #     python-version: ${{ matrix.python-version }}
-
-      #  - name: Setup ollama
-      #    uses: ./.github/actions/setup-ollama
-
-      # - name: Verify VLLM remote server is healthy
-      #   # if: matrix.client-type == 'http'
-      #   run: |
-      #     echo "Verifying vLLM status..."
-      #     vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ github.event.inputs.vllm_server_ip }}:8000/health)
-      #     echo "vLLM remote server /health status: $vllm_status"
-      #     if [ "$vllm_status" != "200" ]; then
-      #       echo "vLLM health check failed"
-      #       exit 1
-      #     fi
+          echo "Verifying vLLM status..."
+          vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ github.event.inputs.vllm_server_ip }}:8000/health)
+          echo "vLLM remote server /health status: $vllm_status"
+          if [ "$vllm_status" != "200" ]; then
+            echo "vLLM health check failed"
+            exit 1
+          fi
 

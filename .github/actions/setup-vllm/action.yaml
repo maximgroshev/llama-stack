@@ -1,0 +1,49 @@
+name: Setup local vLLM
+description: Start vLLM Inference Server on localhost
+inputs:
+
+  vllm-image-version:
+    description: vLLM Docker Image version
+    required: true
+    default: latest
+
+  vllm-server-port:
+    description: vLLM Inference Server port
+    required: true
+    default: "8000"
+
+  model:
+    description: Model to serve by vLLM Inference Server
+    required: true
+    default: meta-llama/Llama-3.2-3B-Instruct
+
+  tool-calling-parser:
+    description: Model Tool Calling parser 
+    required: true
+    default: llama3_json
+
+runs:
+  using: "composite"
+  steps:
+  
+    - name: NVIDIA toolkit configuration and container runtime
+      shell: bash
+      run: |
+        sudo nvidia-ctk runtime configure --runtime=docker
+        sudo systemctl restart docker
+
+    - name: Start vLLM Inference Server
+      shell: bash
+      run: |
+
+        echo "Starting vLLM Inference Server serving ${{ imputs.model }} ..."
+        sudo docker run --runtime nvidia --gpus all \
+            -v ~/.cache/huggingface:/root/.cache/huggingface \
+            --env "HUGGING_FACE_HUB_TOKEN=${{ secrets.HF_PAT }}" \
+            -p 8000:8000 \
+            --ipc=host \
+            vllm/vllm-openai:${{ inputs.vllm-image-version }} \
+            --model ${{ inputs.model }} \
+            --max_model_len 124832 \
+            --enable-auto-tool-choice \
+            --tool-call-parser ${{ inputs.tool-calling-parser }}
