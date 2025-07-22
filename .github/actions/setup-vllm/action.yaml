@@ -36,7 +36,7 @@ runs:
       shell: bash
       run: |
 
-        echo "Starting vLLM Inference Server serving ${{ imputs.model }} ..."
+        echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
         sudo docker run --runtime nvidia --gpus all \
             -v ~/.cache/huggingface:/root/.cache/huggingface \
             --env "HUGGING_FACE_HUB_TOKEN=${{ secrets.HF_PAT }}" \

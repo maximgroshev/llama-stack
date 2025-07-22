@@ -56,7 +56,7 @@ jobs:
           env
           echo "USER: $USER"
 
-      - name: Setup ollama
+      - name: Setup vllm
         uses: ./.github/actions/setup-vllm
         with:
           model: ${{github.event.inputs.model }}
