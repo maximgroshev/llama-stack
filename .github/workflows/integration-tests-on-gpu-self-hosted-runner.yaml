@@ -48,12 +48,7 @@ jobs:
         run: |
           echo "All Env vars: "
           env
-          echo "USER: ${{ env.USER }}"
-
-          echo "Docker: "
-          which docker
-          sudo docker ps -a
-
+          echo "USER: $USER"
 
       - name: "[DEBUG] Configuring docker: "
         run: |
@@ -62,7 +57,7 @@ jobs:
           sudo docker ps -a
 
           # adding $USER to a docker security
-          sudo groupadd docker
+          # sudo groupadd docker
           sudo usermod -aG docker $USER
           newgrp docker
 
