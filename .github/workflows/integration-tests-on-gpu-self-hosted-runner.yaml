@@ -74,9 +74,11 @@ jobs:
 
           for i in {1..${{ inputs.server-timeout }}}; do
 
-            vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ inputs.vllm-server-ip }}:8000/health)
+            vllm_health_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ inputs.vllm-server-ip }}:8000/health)
 
-            if [ "$vllm_status" == "200" ]; then
+            echo "[DEBUG] status code $vllm_health_status" 
+
+            if [ "$vllm_health_status" == "200" ]; then
               echo "vLLM Inference Server is up and running!"
               exit 0
             fi
