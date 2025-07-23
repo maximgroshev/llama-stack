@@ -40,11 +40,11 @@ runs:
       shell: bash
       run: |
 
-        if sudo docker ps -a | grep -q "${{ env.vllm-container }}"; then
-          echo "Container '${{ env.vllm-container }}' exists."
+        if sudo docker ps -a | grep -q "${{ inputs.vllm-container }}"; then
+          echo "Container '${{ inputs.vllm-container }}' exists."
         else
 
-        echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
+          echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
 
           sudo docker run \
               --name ${{ inputs.vllm-container }} \
@@ -60,5 +60,4 @@ runs:
               --max_model_len 124832 \
               --enable-auto-tool-choice \
               --tool-call-parser ${{ inputs.tool-calling-parser }}
-              
         fi
