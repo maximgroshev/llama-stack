@@ -42,10 +42,10 @@ runs:
       run: |
 
         echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
-        sudo docker run --runtime nvidia --gpus all \
+        sudo docker run --runtime nvidia --gpus all --detach \
             -v ~/.cache/huggingface:/root/.cache/huggingface \
             --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface_pat }}" \
-            -p 8000:8000 \
+            --publish ${{ inputs.vllm-image-version }}:8000 \
             --ipc=host \
             vllm/vllm-openai:${{ inputs.vllm-image-version }} \
             --model ${{ inputs.model }} \
