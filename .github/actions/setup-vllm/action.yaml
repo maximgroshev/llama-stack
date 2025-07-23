@@ -43,7 +43,7 @@ runs:
         echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
 
         sudo docker run \
-            --name ${{ inputs.container }}" \
+            --name ${{ inputs.vllm-container }} \
             --runtime nvidia \
             --gpus all \
             --detach \
