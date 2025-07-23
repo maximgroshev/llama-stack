@@ -64,25 +64,24 @@ jobs:
       - name: Setup vllm
         uses: ./.github/actions/setup-vllm
         with:
-          model: ${{github.event.inputs.model }}
+          model: ${{ inputs.model }}
           huggingface_pat: ${{ secrets.HF_PAT }}
 
       - name: Verify VLLM remote server is healthy
+        env:
+          RETRY_INTERVAL: 1
         run: |
 
           echo "Waiting for vLLM Inference Server to come online..."
 
-          for i in {1..${{ inputs.server-timeout }}}; do
-
-            vllm_health_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ inputs.vllm-server-ip }}:8000/health)
-
-            echo "[DEBUG] status code $vllm_health_status" 
-
-            if [ "$vllm_health_status" == "200" ]; then
-              echo "vLLM Inference Server is up and running!"
-              exit 0
-            fi
-            sleep 1
+          for i in $(seq 1 ${{ inputs.server-timeout }}); do
+              if curl --silent --fail "http://${{ inputs.vllm-server-ip }}:8000/health" > /dev/null; then
+                  echo "vLLM server is up and running!"
+                  exit 0
+              else
+                  echo "[Attempt $i/${{ inputs.server-timeout }}] vLLM server not yet available. Retrying in ${RETRY_INTERVAL} seconds..."
+                  sleep $RETRY_INTERVAL
+              fi
           done
 
           echo "vLLM server failed to start after ${{ inputs.server-timeout }} seconds of waiting"
