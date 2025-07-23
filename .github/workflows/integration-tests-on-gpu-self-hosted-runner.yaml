@@ -9,10 +9,15 @@ on:
         required: true
         default: meta-llama/Llama-3.2-3B-Instruct
 
-      vllm_server_ip:
+      vllm-server-ip:
         description: IP address of the vLLM Inference Server
         required: true
         default: "0.0.0.0"
+      
+      server-timeout:
+        description: Time to wait for server to come online
+        required: true
+        default: "300"
 
 #   push:
 #     branches: [ main ]
@@ -64,11 +69,23 @@ jobs:
 
       - name: Verify VLLM remote server is healthy
         run: |
-          echo "Verifying vLLM status..."
-          vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ github.event.inputs.vllm_server_ip }}:8000/health)
-          echo "vLLM remote server /health status: $vllm_status"
-          if [ "$vllm_status" != "200" ]; then
-            echo "vLLM health check failed"
-            exit 1
-          fi
+
+          echo "Waiting for vLLM Inference Server to come online..."
+
+          for i in {1..${{ inputs.server-timeout }}}; do
+
+            vllm_status=$(curl -s -o /dev/null -w "%{http_code}" http://${{ inputs.vllm-server-ip }}:8000/health)
+
+            if [ "$vllm_status" == "200" ]; then
+              echo "vLLM Inference Server is up and running!"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "vLLM server failed to start after ${{ inputs.server-timeout }} seconds of waiting"
+          # cat server.log
+          # TODO: implement docker vLLM container logs dumping
+          exit 1
+
 
