@@ -68,7 +68,7 @@ jobs:
         uses: ./.github/actions/setup-vllm
         with:
           model: ${{ inputs.model }}
-          huggingface_pat: ${{ secrets.HF_PAT }}
+          huggingface-pat: ${{ secrets.HF_PAT }}
           vllm-container: ${{ env.CONTAINER_NAME }}
 
       - name: Verify VLLM remote server is healthy
