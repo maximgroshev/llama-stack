@@ -40,19 +40,25 @@ runs:
       shell: bash
       run: |
 
+        if sudo docker ps -a | grep -q "${{ env.vllm-container }}"; then
+          echo "Container '${{ env.vllm-container }}' exists."
+        else
+
         echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
 
-        sudo docker run \
-            --name ${{ inputs.vllm-container }} \
-            --runtime nvidia \
-            --gpus all \
-            --detach \
-            --volume ~/.cache/huggingface:/root/.cache/huggingface \
-            --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface-pat }}" \
-            --publish ${{ inputs.vllm-server-port }}:8000 \
-            --ipc=host \
-            vllm/vllm-openai:${{ inputs.vllm-image-version }} \
-            --model ${{ inputs.model }} \
-            --max_model_len 124832 \
-            --enable-auto-tool-choice \
-            --tool-call-parser ${{ inputs.tool-calling-parser }}
+          sudo docker run \
+              --name ${{ inputs.vllm-container }} \
+              --runtime nvidia \
+              --gpus all \
+              --detach \
+              --volume ~/.cache/huggingface:/root/.cache/huggingface \
+              --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface-pat }}" \
+              --publish ${{ inputs.vllm-server-port }}:8000 \
+              --ipc=host \
+              vllm/vllm-openai:${{ inputs.vllm-image-version }} \
+              --model ${{ inputs.model }} \
+              --max_model_len 124832 \
+              --enable-auto-tool-choice \
+              --tool-call-parser ${{ inputs.tool-calling-parser }}
+              
+        fi
