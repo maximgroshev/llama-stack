@@ -31,6 +31,9 @@ on:
 #       - 'requirements.txt'
 #       - '.github/workflows/integration-tests.yml' # This workflow
 
+env:
+  CONTAINER_NAME: vllm_server
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -66,11 +69,20 @@ jobs:
         with:
           model: ${{ inputs.model }}
           huggingface_pat: ${{ secrets.HF_PAT }}
+          vllm-container: ${{ env.CONTAINER_NAME }}
 
       - name: Verify VLLM remote server is healthy
         env:
           RETRY_INTERVAL: 1
         run: |
+
+          if docker ps -a | grep -q "${{ env.CONTAINER_NAME }}"; then
+            echo "Container '${{ env.CONTAINER_NAME }}' exists."
+            echo "Checking if vLLM Inference Server is online..."
+          else
+            echo "Container '${{ env.CONTAINER_NAME }}' does not exist."
+            exit 1
+          fi
 
           echo "Waiting for vLLM Inference Server to come online..."
 

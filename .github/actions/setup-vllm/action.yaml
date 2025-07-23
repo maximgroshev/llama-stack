@@ -7,6 +7,11 @@ inputs:
     required: true
     default: latest
 
+  vllm-container:
+    description: vLLM Docker Container name
+    required: true
+    default: vllm_server
+
   vllm-server-port:
     description: vLLM Inference Server port
     required: true
@@ -22,7 +27,7 @@ inputs:
     required: true
     default: llama3_json
   
-  huggingface_pat:
+  huggingface-pat:
     description: HuggingFace Personal Access Token
     required: true
     default: N/A
@@ -38,12 +43,12 @@ runs:
         echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
 
         sudo docker run \
-            --name vllm_server \
+            --name ${{ inputs.container }}" \
             --runtime nvidia \
             --gpus all \
             --detach \
             --volume ~/.cache/huggingface:/root/.cache/huggingface \
-            --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface_pat }}" \
+            --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface-pat }}" \
             --publish ${{ inputs.vllm-server-port }}:8000 \
             --ipc=host \
             vllm/vllm-openai:${{ inputs.vllm-image-version }} \
