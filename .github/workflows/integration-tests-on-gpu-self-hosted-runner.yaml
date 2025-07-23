@@ -62,7 +62,12 @@ jobs:
         run: |
           echo "All Env vars: "
           env
-          echo "USER: $USER"
+
+      - name: Check Storage and Memory Available Before Tests
+        if: ${{ always() }}
+        run: |
+          free -h
+          df -h
 
       - name: Setup vllm
         uses: ./.github/actions/setup-vllm
@@ -103,4 +108,23 @@ jobs:
 
           exit 1
 
+      - name: Check Storage and Memory Available After Tests
+        if: ${{ always() }}
+        run: |
+          free -h
+          df -h
 
+      - name: Write vLLM logs to file
+
+        if: ${{ always() }}
+        run: |
+          sudo docker logs ${{ env.CONTAINER_NAME }} > ${{ env.CONTAINER_NAME }}.log
+
+      - name: Upload all logs to artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.test-type }}-${{ matrix.python-version }}-${{ matrix.client-version }}
+          path: |
+            *.log
+          retention-days: 1
