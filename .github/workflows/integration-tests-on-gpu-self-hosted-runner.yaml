@@ -76,7 +76,7 @@ jobs:
           RETRY_INTERVAL: 1
         run: |
 
-          if docker ps -a | grep -q "${{ env.CONTAINER_NAME }}"; then
+          if sudo docker ps -a | grep -q "${{ env.CONTAINER_NAME }}"; then
             echo "Container '${{ env.CONTAINER_NAME }}' exists."
             echo "Checking if vLLM Inference Server is online..."
           else
@@ -97,8 +97,10 @@ jobs:
           done
 
           echo "vLLM server failed to start after ${{ inputs.server-timeout }} seconds of waiting"
-          # cat server.log
-          # TODO: implement docker vLLM container logs dumping
+        
+          sudo docker logs ${{ env.CONTAINER_NAME }} > ${{ env.CONTAINER_NAME }}.log
+          cat ${{ env.CONTAINER_NAME }}.log
+
           exit 1
 
 
