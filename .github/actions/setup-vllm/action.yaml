@@ -30,12 +30,6 @@ inputs:
 runs:
   using: "composite"
   steps:
-  
-    - name: NVIDIA toolkit configuration and container runtime
-      shell: bash
-      run: |
-        sudo nvidia-ctk runtime configure --runtime=docker
-        sudo systemctl restart docker
 
     - name: Start vLLM Inference Server
       shell: bash
