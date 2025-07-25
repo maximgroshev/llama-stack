@@ -161,6 +161,9 @@ jobs:
           VLLM_URL: "http://${{ inputs.vllm-server-ip }}:8000/v1/"
           VLLM_INFERENCE_MODEL: ${{ inputs.model }}
         run: |
+
+          set -e
+          
           if [ "${{ matrix.client-type }}" == "library" ]; then
             stack_config="${{ env.LLAMA_STACK_TEMPLATE }}"
           else
