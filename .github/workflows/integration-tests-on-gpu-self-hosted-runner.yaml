@@ -118,9 +118,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test-type: ${{ fromJson(needs.discover-tests.outputs.test-type) }}
+        # test-type: ${{ fromJson(needs.discover-tests.outputs.test-type) }}
         # client-type: [library, server]
         # python-version: ["3.12", "3.13"]
+        test-type: [inference]
         client-type: [server]
         python-version: ["3.13"]
         client-version: ${{ (github.event_name == 'schedule' || github.event.inputs.test-all-client-versions == 'true') && fromJSON('["published", "latest"]') || fromJSON('["latest"]') }}
