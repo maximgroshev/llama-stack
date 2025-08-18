@@ -1,0 +1,126 @@
+# /home/maxgroshev/llama-stack/.github/actions/setup-vllm-gpu/action.yml
+
+name: Setup local vLLM Inference Server on GPU machine
+description: Start vLLM Inference Server on localhost
+inputs:
+
+  vllm-version:
+    description: vLLM Docker Image version
+    required: true
+    default: latest
+
+  vllm-container:
+    description: vLLM Docker Container name
+    required: true
+    default: vllm_server
+
+  vllm-server-port:
+    description: vLLM Inference Server port
+    required: true
+    default: "8000"
+
+  model:
+    description: Model to serve by vLLM Inference Server
+    required: true
+    default: meta-llama/Llama-3.2-3B-Instruct
+
+  tool-calling-parser:
+    description: Model Tool Calling parser
+    required: true
+    default: llama3_json
+
+  huggingface-pat:
+    description: HuggingFace Personal Access Token
+    required: true
+    default: N/A
+
+  server-timeout:
+    description: Timeout for vLLM Inference Server to come online
+    required: true
+    default: 300
+
+runs:
+  using: "composite"
+  steps:
+
+    - name: Start vLLM Inference Server
+      id: start-vllm-server
+      shell: bash
+      run: |
+
+        echo "start-time=$(date +%s)" >> $GITHUB_OUTPUT
+
+        ## Removing all stopped containers to avoid potential issues with starting vLLM Inference Server:
+        stopped_containers=$(sudo docker ps -a -q -f status=exited)
+        if [ $stopped_containers != '' ]; then
+          sudo docker rm $stopped_containers
+        fi
+
+        ## Checking if vLLM Inference Server container with specified name is already RUNNING:
+        if sudo docker ps | grep -q "${{ inputs.vllm-container }}"; then
+          echo "Container '${{ inputs.vllm-container }}' is already up and running."
+        else
+
+          ## Stopiing docker container that occupies port 8000:
+          running_server_container=$(sudo docker ps --filter "publish=8000/tcp" --format "{{.ID}}")
+          if [ $running_server_container != '' ]; then
+            sudo docker rm --force  $running_server_container
+          fi
+
+          echo "Starting vLLM Inference Server serving ${{ inputs.model }} ..."
+
+          sudo docker run \
+              --name ${{ inputs.vllm-container }} \
+              --runtime nvidia \
+              --gpus all \
+              --detach \
+              --volume ~/.cache/huggingface:/root/.cache/huggingface \
+              --env "HUGGING_FACE_HUB_TOKEN=${{ inputs.huggingface-pat }}" \
+              --publish ${{ inputs.vllm-server-port }}:8000 \
+              --ipc=host \
+              vllm/vllm-openai:${{ inputs.vllm-version }} \
+              --model ${{ inputs.model }} \
+              --max_model_len 124832 \
+              --enable-auto-tool-choice \
+              --tool-call-parser ${{ inputs.tool-calling-parser }}
+        fi
+
+    - name: Verify VLLM remote server is healthy
+      id: verify-vllm-server-health
+      shell: bash
+      env:
+        RETRY_INTERVAL: 1
+      run: |
+
+        if sudo docker ps --all | grep -q "${{ inputs.vllm-container }}"; then
+          echo "Container '${{ inputs.vllm-container }}' exists."
+          echo "Checking if vLLM Inference Server is online..."
+        else
+          echo "Container '${{ inputs.vllm-container }}' does not exist."
+          exit 1
+        fi
+
+        echo "Waiting for vLLM Inference Server to come online..."
+
+        for i in $(seq 1 ${{ inputs.server-timeout }}); do
+            if curl --silent --fail "http://0.0.0.0:8000/health" > /dev/null; then
+                # echo "vLLM server is up and running!"
+
+                start_time=${{ steps.start-vllm-server.outputs.start-time }}
+                end_time=$(date +%s)
+                time_to_start_vllm_server=$((end_time - start_time))
+
+                echo "[DEBUG] vLLM server is up and running after $time_to_start_vllm_server seconds since the start of the container"
+                exit 0
+            else
+                echo "[DEBUG][Attempt $i/${{ inputs.server-timeout }}] vLLM server not yet available. Retrying in ${RETRY_INTERVAL} seconds..."
+                sleep $RETRY_INTERVAL
+            fi
+        done
+
+        echo "vLLM server failed to start after ${{ inputs.server-timeout }} seconds of waiting"
+
+        sudo docker logs ${{ inputs.vllm-container }} > ${{ inputs.vllm-container }}.log
+        cat ${{ inputs.vllm-container }}.log
+
+        exit 1

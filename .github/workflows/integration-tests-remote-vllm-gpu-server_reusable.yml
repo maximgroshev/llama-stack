@@ -1,0 +1,238 @@
+# /home/maxgroshev/llama-stack/.github/workflows/integration-tests-remote-vllm-gpu-server_reusable.yml
+
+name: "[Self-Hosted runner][Reusable] Integration Tests running agains a vLLM Inference Server"
+
+on:
+
+## TEMP:
+#   push:
+#     branches: [ main ]
+#   pull_request:
+#     branches: [ main ]
+#     paths:
+#       - 'llama_stack/**'
+#       - 'tests/integration/**'
+#       - 'uv.lock'
+#       - 'pyproject.toml'
+#       - 'requirements.txt'
+#       - '.github/workflows/integration-tests.yml' # This workflow
+
+  ## Triggering the workflow as reusable by the upstream workflows:
+  workflow_call:
+    inputs:
+
+      vllm-version:
+        description: vLLM Inference Server version
+        type: string
+        required: true
+
+      model:
+        description: Model to serve by vLLM Inference Server
+        type: string
+        required: true
+
+      vllm-server-ip:
+        description: IP address of the vLLM Inference Server
+        type: string
+        required: false
+
+      server-timeout:
+        description: Time to wait for server to come online
+        type: string
+        required: true
+
+      test-all-client-versions:
+        description: 'Test against both the latest and published versions'
+        type: boolean
+        required: false
+
+    secrets:
+      huggingface-pat:
+        required: true
+
+  ## Manually dispatching the workflow:
+  workflow_dispatch: # Only triggering workflow manually.
+    inputs:
+
+      vllm-version:
+        description: vLLM Inference Server version
+        required: true
+        default: latest
+
+      model:
+        description: Model to serve by vLLM Inference Server
+        required: true
+        # default: meta-llama/Llama-3.2-3B-Instruct
+        default: meta-llama/Llama-3.2-1B-Instruct
+
+      vllm-server-ip:
+        description: IP address of the vLLM Inference Server
+        required: false
+        default: "0.0.0.0"
+
+      server-timeout:
+        description: Time to wait for server to come online
+        required: true
+        default: "300"
+
+      test-all-client-versions:
+        description: 'Test against both the latest and published versions'
+        type: boolean
+        default: false
+
+env:
+  PROVIDER: vllm
+  CONTAINER_NAME: vllm_server_${{ inputs.vllm-version }}
+  # LLAMA_STACK_DISTRO: remote-vllm-gpu
+  LLAMA_STACK_DISTRO: ci-tests
+  EMBEDDING_MODEL: sentence-transformers/all-MiniLM-L6-v2
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}}-${{ inputs.vllm-version }}
+  cancel-in-progress: false
+
+jobs:
+  discover-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      test-types: ${{ steps.generate-test-types.outputs.test-types }}
+    concurrency:
+      group: ${{ github.workflow }}-discover-tests
+      cancel-in-progress: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Generate test types
+        id: generate-test-types
+        run: |
+          # Get test directories dynamically, excluding non-test directories
+          # NOTE: we are excluding post_training since the tests take too long
+          TEST_TYPES=$(find tests/integration -maxdepth 1 -mindepth 1 -type d -printf "%f\n" |
+            grep -Ev "^(__pycache__|fixtures|test_cases|recordings|post_training)$" |
+            sort | jq -R -s -c 'split("\n")[:-1]')
+          echo "test-types=$TEST_TYPES" >> $GITHUB_OUTPUT
+
+  prepare_self_hosted_runner:
+    runs-on: [self-hosted, linux, X64]
+
+    steps:
+      ## Checkout is required to get the reference to local action "setup-vllm-gpu"
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Setup vllm GPU
+        uses: ./.github/actions/setup-vllm-gpu
+        with:
+          vllm-version: ${{ inputs.vllm-version }}
+          model: ${{ inputs.model }}
+          huggingface-pat: ${{ secrets.huggingface-pat || secrets.HF_PAT }}
+          vllm-container: ${{ env.CONTAINER_NAME }}
+
+
+  test-matrix:
+    runs-on: [self-hosted, linux, X64]
+    needs: [discover-tests, prepare_self_hosted_runner]
+
+    ## TEMP:
+    # strategy:
+    #   fail-fast: false
+    #   matrix:
+    #     test-type: ${{ fromJson(needs.discover-tests.outputs.test-type) }}
+    #     client-type: [server]
+    #     python-version: ["3.13"]
+    #     client-version: ${{ (github.event_name == 'schedule' || github.event.inputs.test-all-client-versions == 'true') && fromJSON('["published", "latest"]') || fromJSON('["latest"]') }}
+
+
+    strategy:
+      fail-fast: false # we want to run all tests regardless of failure
+      matrix:
+        # client-type: [server]
+        # python-version: ["3.12"]
+        # client-version: [latest]
+        client-type: [library, server]
+        # Use vllm on weekly schedule, otherwise use test-provider input (defaults to ollama)
+        # provider: ${{ (github.event.schedule == '1 0 * * 0') && fromJSON('["vllm"]') || fromJSON(format('["{0}"]', github.event.inputs.test-provider || 'ollama')) }}
+        # Use Python 3.13 only on nightly schedule (daily latest client test), otherwise use 3.12
+        python-version: ${{ github.event.schedule == '0 0 * * *' && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
+        client-version: ${{ (github.event.schedule == '0 0 * * *' || github.event.inputs.test-all-client-versions == 'true') && fromJSON('["published", "latest"]') || fromJSON('["latest"]') }}
+        run-vision-tests: [true, false]
+
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Changing target directories ownership to USER
+        run: |
+          for directory in ".cache" ".llama" "actions-runner/_work/llama-stack/llama-stack"; do
+
+            dir_path="/home/$USER/$directory"
+
+            sudo chown -R $USER:$USER $dir_path
+            sudo chmod -R u+wx $dir_path
+          done
+
+
+      - name: Install dependencies
+        uses: ./.github/actions/setup-runner
+        with:
+          python-version: ${{ matrix.python-version }}
+          client-version: ${{ matrix.client-version }}
+
+
+      - name: Build Llama Stack
+        shell: bash
+        run: |
+          uv run llama stack build --distro ${{ env.LLAMA_STACK_DISTRO }} --image-type venv
+
+
+      - name: Run Integration Tests
+        shell: bash
+        run: |
+          ./scripts/integration-tests.sh \
+            --stack-config ${{ matrix.client-type == 'library' && env.LLAMA_STACK_DISTRO || 'server:env.LLAMA_STACK_DISTRO' }} \
+            --provider  '${{ env.PROVIDER }}' \
+            --model '${{ inputs.model }}' \
+            --test-types '${{ needs.discover-tests.outputs.test-types }}' \
+            --inference-mode 'record'
+
+
+      - name: Stop Llama Stack server
+        if: ${{ always() }}
+        run: |
+
+            if curl -s http://localhost:8321/v1/health | grep -q "OK"; then
+              echo "Llama Stack server is running. Sending SIGINT signal to the process to kill it gracefully."
+              # ps aux | grep -v grep | grep llama_stack.distribution.server.server | awk '{print $2}' | xargs kill -2
+
+              ## Grabbing Llama Stack server PID based on the port number the server is listening on:
+              lsof -i :8321 | grep IPv4 | awk '{print $2}' | xargs kill -2
+            fi
+
+            if [ -e server.log ]; then
+              LOG_FILE=server-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}.log
+              mv server.log $LOG_FILE
+            fi
+
+      - name: Upload all logs to artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}--${{ inputs.vllm-version }}
+          path: |
+            *.log
+          retention-days: 1
+
+
+  stop_inference_server:
+    runs-on: [self-hosted, linux, X64]
+    needs: test-matrix
+    if: ${{ always() }}
+
+    steps:
+      - name: Stop vLLM server and write logs to file
+        if: ${{ always() }}
+        run: |
+          sudo docker stop ${{ env.CONTAINER_NAME }}
+          sudo docker rm ${{ env.CONTAINER_NAME }}
