@@ -14,6 +14,7 @@ set -euo pipefail
 # Default values
 STACK_CONFIG=""
 PROVIDER=""
+MODEL=""
 TEST_SUBDIRS=""
 TEST_PATTERN=""
 RUN_VISION_TESTS="false"
@@ -28,6 +29,7 @@ Usage: $0 [OPTIONS]
 Options:
     --stack-config STRING    Stack configuration to use (required)
     --provider STRING        Provider to use (ollama, vllm, etc.) (required)
+    --model STRING           Model to use (defaults: [ollama] llama3.2:3b-instruct-fp16, [vllm] meta-llama/Llama-3.2-1B-Instruct)
     --test-subdirs STRING    Comma-separated list of test subdirectories to run (default: 'inference')
     --run-vision-tests       Run vision tests instead of regular tests
     --inference-mode STRING  Inference mode: record or replay (default: replay)
@@ -58,6 +60,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --provider)
             PROVIDER="$2"
+            shift 2
+            ;;
+        --model)
+            MODEL="$2"
             shift 2
             ;;
         --test-subdirs)
@@ -102,9 +108,22 @@ if [[ -z "$PROVIDER" ]]; then
     exit 1
 fi
 
+if [[ -z "$MODEL" ]]; then
+
+    if [[ "$PROVIDER" == "ollama" ]]; then
+        MODEL="llama3.2:3b-instruct-fp16"
+    fi
+
+    if [[ "$PROVIDER" == "vllm" ]]; then
+        MODEL="meta-llama/Llama-3.2-1B-Instruct"
+    fi
+
+fi
+
 echo "=== Llama Stack Integration Test Runner ==="
 echo "Stack Config: $STACK_CONFIG"
 echo "Provider: $PROVIDER"
+echo "Model: $MODEL"
 echo "Test Subdirs: $TEST_SUBDIRS"
 echo "Vision Tests: $RUN_VISION_TESTS"
 echo "Inference Mode: $INFERENCE_MODE"
@@ -124,12 +143,12 @@ export LLAMA_STACK_TEST_INFERENCE_MODE="$INFERENCE_MODE"
 # Configure provider-specific settings
 if [[ "$PROVIDER" == "ollama" ]]; then
     export OLLAMA_URL="http://0.0.0.0:11434"
-    export TEXT_MODEL="ollama/llama3.2:3b-instruct-fp16"
+    export TEXT_MODEL="ollama/$MODEL"
     export SAFETY_MODEL="ollama/llama-guard3:1b"
     EXTRA_PARAMS="--safety-shield=llama-guard"
 else
     export VLLM_URL="http://localhost:8000/v1"
-    export TEXT_MODEL="vllm/meta-llama/Llama-3.2-1B-Instruct"
+    export TEXT_MODEL="vllm/$MODEL"
     EXTRA_PARAMS=""
 fi
 
