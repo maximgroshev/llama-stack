@@ -142,7 +142,8 @@ jobs:
 
   test-matrix:
     runs-on: [self-hosted, linux, X64]
-    needs: [discover-tests, prepare_self_hosted_runner]
+    needs: prepare_self_hosted_runner
+    # needs: [discover-tests, prepare_self_hosted_runner]
 
     ## TEMP:
     # strategy:

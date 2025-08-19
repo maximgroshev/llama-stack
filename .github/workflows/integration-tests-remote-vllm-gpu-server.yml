@@ -39,7 +39,7 @@ jobs:
         # vllm-version: [v0.9.1, v0.9.2, v0.10.0]
         vllm-version: [latest]
 
-    uses: ./.github/workflows/integration-tests-remote-vllm-gpu-server_reusable.yml
+    uses: ./.github/workflows/integration-tests-remote-vllm-gpu-server-reusable.yml
     with:
       vllm-version: ${{ matrix.vllm-version }}
       model: ${{ inputs.model }}
