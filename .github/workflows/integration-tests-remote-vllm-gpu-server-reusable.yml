@@ -225,7 +225,7 @@ jobs:
             fi
 
             if [ -e server.log ]; then
-              LOG_FILE=server-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}-${{ matrix.run-vision-tests == "true" && 'with_vision_tests' || 'no_vision_tests' }}.log
+              LOG_FILE=server-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}-${{ matrix.run-vision-tests == 'true' && 'with_vision_tests' || 'no_vision_tests' }}.log
               mv server.log $LOG_FILE
             fi
 
@@ -233,7 +233,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}-${{ matrix.run-vision-tests == "true" && 'with_vision_tests' || 'no_vision_tests' }}
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}-${{ matrix.run-vision-tests == 'true' && 'with_vision_tests' || 'no_vision_tests' }}
           path: |
             *.log
           retention-days: 1
