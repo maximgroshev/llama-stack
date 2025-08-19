@@ -19,6 +19,11 @@ on:
         required: true
         default: "300"
 
+      test-pattern:
+        description: 'Regex pattern to pass to pytest -k'
+        type: string
+        default: ''
+
       test-all-client-versions:
         description: 'Test against both the latest and published versions'
         type: boolean
@@ -40,6 +45,7 @@ jobs:
       model: ${{ inputs.model }}
       vllm-server-ip: ${{ inputs.vllm-server-ip }}
       server-timeout: ${{ inputs.server-timeout }}
+      test-pattern: ${{ inputs.test-pattern }}
       test-all-client-versions: ${{ inputs.test-all-client-versions }}
     secrets:
       huggingface-pat: ${{ secrets.HF_PAT }}
