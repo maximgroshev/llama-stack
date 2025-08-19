@@ -167,7 +167,8 @@ jobs:
         # Use Python 3.13 only on nightly schedule (daily latest client test), otherwise use 3.12
         python-version: ${{ github.event.schedule == '0 0 * * *' && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
         client-version: ${{ (github.event.schedule == '0 0 * * *' || github.event.inputs.test-all-client-versions == 'true') && fromJSON('["published", "latest"]') || fromJSON('["latest"]') }}
-        run-vision-tests: [true, false]
+        # run-vision-tests: [true, false]
+        run-vision-tests: false # Disable vision tests for vLLM for now.
 
 
     steps:
@@ -224,7 +225,7 @@ jobs:
             fi
 
             if [ -e server.log ]; then
-              LOG_FILE=server-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}.log
+              LOG_FILE=server-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}-{{ matrix.run-vision-tests == true && 'with_vision_tests' || 'no_vision_tests' }}.log
               mv server.log $LOG_FILE
             fi
 
@@ -232,7 +233,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}--${{ inputs.vllm-version }}
+          name: logs-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.client-type }}-${{ matrix.python-version }}-${{ inputs.vllm-version }}-{{ matrix.run-vision-tests == true && 'with_vision_tests' || 'no_vision_tests' }}
           path: |
             *.log
           retention-days: 1
