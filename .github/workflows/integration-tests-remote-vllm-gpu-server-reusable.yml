@@ -193,10 +193,10 @@ jobs:
           client-version: ${{ matrix.client-version }}
 
 
-      - name: Build Llama Stack
-        shell: bash
-        run: |
-          uv run llama stack build --distro ${{ env.LLAMA_STACK_DISTRO }} --image-type venv
+      # - name: Build Llama Stack
+      #   shell: bash
+      #   run: |
+      #     uv run llama stack build --distro ${{ env.LLAMA_STACK_DISTRO }} --image-type venv
 
 
       - name: Run Integration Tests
